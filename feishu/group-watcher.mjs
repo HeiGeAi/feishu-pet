@@ -34,16 +34,20 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
-// 本地私有配置 feishu/.env.local（KEY=VALUE 每行一个，gitignore 不入库），环境变量优先
-try {
-  const envFile = join(dirname(fileURLToPath(import.meta.url)), '.env.local')
-  if (existsSync(envFile)) {
-    for (const line of readFileSync(envFile, 'utf8').split('\n')) {
-      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.+?)\s*$/)
-      if (m && !process.env[m[1]]) process.env[m[1]] = m[2]
+// 本地私有配置 feishu/.env.local（KEY=VALUE 每行一个，gitignore 不入库），环境变量优先。
+// PET_SKIP_ENV_FILE=1 时跳过：测试要的是干净环境，否则开发机上的真实配置会盖掉 mock，
+// 导致同一个测试在 CI 通过、在配好飞书的真机上失败。
+if (process.env.PET_SKIP_ENV_FILE !== '1') {
+  try {
+    const envFile = join(dirname(fileURLToPath(import.meta.url)), '.env.local')
+    if (existsSync(envFile)) {
+      for (const line of readFileSync(envFile, 'utf8').split('\n')) {
+        const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.+?)\s*$/)
+        if (m && !process.env[m[1]]) process.env[m[1]] = m[2]
+      }
     }
-  }
-} catch { /* 没有就算了 */ }
+  } catch { /* 没有就算了 */ }
+}
 
 const require = createRequire(import.meta.url)
 const { llmChat, loadLlmConfig } = require('./llm-client.cjs')

@@ -4,6 +4,11 @@ const test = require('node:test')
 let watcher
 
 test.before(async () => {
+  // 隔离开发机环境：跳过 .env.local，并清掉可能已存在的真实身份，
+  // 否则模块在导入时就带上真实 open_id，下面的 mock 永远不会被调用。
+  process.env.PET_SKIP_ENV_FILE = '1'
+  delete process.env.PET_MY_OPEN_ID
+  delete process.env.PET_CHAT_ID
   watcher = await import('../feishu/group-watcher.mjs')
 })
 

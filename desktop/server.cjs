@@ -111,6 +111,18 @@ function cleanPlanInteger(value, name, { min = 0, max = Number.MAX_SAFE_INTEGER 
   return number
 }
 
+function cleanPlanBoolean(value, name, { defaultValue } = {}) {
+  if (value === undefined || value === null || value === '') return defaultValue
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string' && /^(?:true|false)$/i.test(value.trim())) {
+    return value.trim().toLowerCase() === 'true'
+  }
+  throw new workspace.WorkspaceError(`${name}格式不正确`, {
+    code: 'INVALID_PLAN',
+    status: 422,
+  })
+}
+
 function planIdempotencyKey(value, kind) {
   const key = cleanPlanString(value, 100)
   return key && /^pet-plan-[a-z]+-[0-9a-f-]{36}$/i.test(key)
@@ -184,13 +196,22 @@ function sanitizeAssistantPlan(raw) {
       const reminderMinutes = cleanPlanInteger(source.reminderMinutes, '日程提醒时间', {
         max: 20_160,
       })
+      const summary = cleanPlanString(source.summary, 1000)
+      const start = cleanPlanString(source.start, 80)
+      const end = cleanPlanString(source.end, 80)
+      if (!summary || !start || !end) {
+        throw new workspace.WorkspaceError('创建日程需要标题、开始时间和结束时间', {
+          code: 'INVALID_PLAN',
+          status: 422,
+        })
+      }
       args = {
-        summary: cleanPlanString(source.summary, 1000),
-        start: cleanPlanString(source.start, 80),
-        end: cleanPlanString(source.end, 80),
+        summary,
+        start,
+        end,
         description: cleanPlanString(source.description, 5000),
         location: cleanPlanString(source.location, 500),
-        meeting: Boolean(source.meeting),
+        meeting: cleanPlanBoolean(source.meeting, '是否视频会议', { defaultValue: false }),
         reminderMinutes: reminderMinutes ?? 5,
         idempotencyKey: planIdempotencyKey(source.idempotencyKey, 'calendar'),
         attendees: Array.isArray(source.attendees)
@@ -223,7 +244,9 @@ function sanitizeAssistantPlan(raw) {
         ...(source.location !== undefined
           ? { location: cleanPlanString(source.location, 500) }
           : {}),
-        ...(source.meeting !== undefined ? { meeting: Boolean(source.meeting) } : {}),
+        ...(source.meeting !== undefined
+          ? { meeting: cleanPlanBoolean(source.meeting, '是否视频会议') }
+          : {}),
         ...(reminderMinutes !== undefined
           ? { reminderMinutes }
           : {}),
@@ -746,7 +769,6 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
             ts: Date.now(),
             source: String(parsed.source ?? 'api').slice(0, 30),
           }
-          lastCommand = cmd
           archive.add({
             kind: 'command',
             ts: cmd.ts,
@@ -754,7 +776,10 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
             label: cmd.label,
             source: cmd.source,
           })
-          broadcast({ type: 'command', command: cmd })
+          if (parsed.dispatch !== false) {
+            lastCommand = cmd
+            broadcast({ type: 'command', command: cmd })
+          }
           json(res, { ok: true, command: cmd })
         } catch {
           json(res, { ok: false, error: 'invalid JSON' })

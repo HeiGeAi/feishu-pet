@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -148,6 +149,10 @@ function ErrorLine({ error }: { error: ApiError | null }) {
   )
 }
 
+const AssistantPet = memo(function AssistantPet() {
+  return <PetStage state="idle" stateSince={0} interact={{ kind: 'pat', n: 0 }} scale={1} />
+})
+
 export default function MiniAssistant() {
   const [restoredContext] = useState(loadAssistantContext)
   const [expanded, setExpanded] = useState(restoredContext.expanded)
@@ -157,7 +162,7 @@ export default function MiniAssistant() {
   const [calendar, setCalendar] = useState<CalendarItem[]>([])
   const [expandedApproval, setExpandedApproval] = useState<string | null>(null)
   const [overviewLoading, setOverviewLoading] = useState(true)
-  const [instruction, setInstruction] = useState(restoredContext.instruction)
+  const [hasInstruction, setHasInstruction] = useState(Boolean(restoredContext.instruction.trim()))
   const [plan, setPlan] = useState<AssistantPlan | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)
@@ -167,6 +172,7 @@ export default function MiniAssistant() {
   const [pendingTaskCompletion, setPendingTaskCompletion] = useState('')
   const [completingTask, setCompletingTask] = useState('')
   const operationBusy = busy || Boolean(completingTask)
+  const hasInlineConfirmation = Boolean(pendingTaskCompletion)
   const nextMessageId = useRef(Math.max(1, ...restoredContext.messages.map((item) => item.id)) + 1)
   const overviewRequestId = useRef(0)
   const overviewToggleRef = useRef<HTMLButtonElement>(null)
@@ -175,9 +181,35 @@ export default function MiniAssistant() {
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const closeDialogRef = useRef<HTMLElement>(null)
   const closePromptWasOpen = useRef(false)
+  const instructionInputRef = useRef<HTMLTextAreaElement>(null)
+  const instructionDraftRef = useRef(restoredContext.instruction)
+  const hasInstructionRef = useRef(Boolean(restoredContext.instruction.trim()))
 
   const addMessage = useCallback((message: Omit<ChatMessage, 'id'>) => {
     setMessages((old) => [...old.slice(-5), { ...message, id: nextMessageId.current++ }])
+  }, [])
+
+  const updateInstructionDraft = useCallback((value: string) => {
+    instructionDraftRef.current = value
+    const nextHasInstruction = Boolean(value.trim())
+    if (nextHasInstruction !== hasInstructionRef.current) {
+      hasInstructionRef.current = nextHasInstruction
+      setHasInstruction(nextHasInstruction)
+    }
+  }, [])
+
+  const clearInstruction = useCallback(() => {
+    instructionDraftRef.current = ''
+    if (instructionInputRef.current) instructionInputRef.current.value = ''
+    if (hasInstructionRef.current) {
+      hasInstructionRef.current = false
+      setHasInstruction(false)
+    }
+  }, [])
+
+  const cancelPlan = useCallback(() => {
+    setPlan(null)
+    requestAnimationFrame(() => instructionInputRef.current?.focus())
   }, [])
 
   const cancelTaskCompletion = useCallback(() => {
@@ -272,9 +304,9 @@ export default function MiniAssistant() {
   }), [approvals, calendar, tasks])
 
   const requestPlan = async () => {
-    const text = instruction.trim()
-    if (!text || operationBusy || pendingTaskCompletion) return
-    setInstruction('')
+    const text = instructionDraftRef.current.trim()
+    if (!text || operationBusy || hasInlineConfirmation) return
+    clearInstruction()
     setBusy(true)
     setPlan(null)
     setError(null)
@@ -370,7 +402,7 @@ export default function MiniAssistant() {
   }
 
   const executePlan = async () => {
-    if (!plan || operationBusy || pendingTaskCompletion) return
+    if (!plan || operationBusy || hasInlineConfirmation) return
     const executingPlan = plan
     setBusy(true)
     setError(null)
@@ -392,10 +424,14 @@ export default function MiniAssistant() {
           : '处理完成，飞书列表已刷新。'
       addMessage({ role: 'assistant', text: successText, success: true })
       setPlan(null)
-      await loadOverview()
+      void loadOverview()
       if (executingPlan.action.startsWith('task.')) {
         setExpanded(true)
         setOverviewTab('tasks')
+        window.petAPI?.resizeAssistant?.(true)
+      } else if (executingPlan.action.startsWith('calendar.')) {
+        setExpanded(true)
+        setOverviewTab('calendar')
         window.petAPI?.resizeAssistant?.(true)
       }
     } catch (err) {
@@ -421,7 +457,7 @@ export default function MiniAssistant() {
       if (choice === 'preserve') {
         localStorage.setItem(ASSISTANT_CONTEXT_KEY, JSON.stringify({
           messages: messages.slice(-12),
-          instruction,
+          instruction: instructionDraftRef.current,
           expanded,
           overviewTab,
         } satisfies CachedAssistantContext))
@@ -435,14 +471,14 @@ export default function MiniAssistant() {
     }
     if (choice === 'clear') {
       setMessages(DEFAULT_MESSAGES)
-      setInstruction('')
+      clearInstruction()
       setPlan(null)
       setPendingTaskCompletion('')
     }
     setRememberCloseChoice(false)
     setClosePrompt(false)
     closeAssistantWindow()
-  }, [closeAssistantWindow, expanded, instruction, messages, overviewTab])
+  }, [clearInstruction, closeAssistantWindow, expanded, messages, overviewTab])
 
   const requestCloseAssistant = useCallback(() => {
     if (operationBusy) return
@@ -501,7 +537,7 @@ export default function MiniAssistant() {
         <header className="assistant-drag flex h-[68px] shrink-0 items-center gap-2 border-b-2 border-[#191919] bg-white px-3">
           <div className="h-14 w-14 shrink-0 overflow-hidden">
             <div className="origin-top-left scale-[0.21]">
-              <PetStage state="idle" stateSince={Date.now()} interact={{ kind: 'pat', n: 0 }} scale={1} />
+              <AssistantPet />
             </div>
           </div>
           <div className="min-w-0 flex-1">
@@ -581,7 +617,10 @@ export default function MiniAssistant() {
                             else taskCompletionRefs.current.delete(task.guid)
                           }}
                           className={`assistant-mini-action shrink-0 ${awaitingConfirmation ? 'bg-[#FFD60A]' : 'bg-white hover:bg-[#DDF9B9]'}`}
-                          onClick={() => awaitingConfirmation ? cancelTaskCompletion() : setPendingTaskCompletion(task.guid)}
+                          onClick={() => {
+                            if (awaitingConfirmation) cancelTaskCompletion()
+                            else setPendingTaskCompletion(task.guid)
+                          }}
                           disabled={!task.guid || operationBusy || Boolean(plan)}
                           title={plan ? '请先处理当前操作预览' : '完成任务'}
                           aria-label={`完成任务：${task.summary}`}
@@ -708,11 +747,11 @@ export default function MiniAssistant() {
             <p className="mt-2 text-xs font-black leading-relaxed">{plan.preview}</p>
             {plan.action !== 'clarify' && (
               <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
-                <button className="assistant-command-button bg-[#9BE83A]" onClick={executePlan} disabled={operationBusy || Boolean(pendingTaskCompletion)}>
+                <button className="assistant-command-button bg-[#9BE83A]" onClick={executePlan} disabled={operationBusy || hasInlineConfirmation}>
                   {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
                   {plan.requiresConfirmation ? '确认执行' : '立即查询'}
                 </button>
-                <button className="assistant-icon-button bg-white" onClick={() => setPlan(null)} disabled={operationBusy} title="取消" aria-label="取消"><X className="h-4 w-4" /></button>
+                <button className="assistant-icon-button bg-white" onClick={cancelPlan} disabled={operationBusy} title="取消" aria-label="取消"><X className="h-4 w-4" /></button>
               </div>
             )}
           </section>
@@ -727,20 +766,22 @@ export default function MiniAssistant() {
         >
           <div className="flex items-end gap-2">
             <textarea
+              ref={instructionInputRef}
               className="min-h-11 max-h-24 flex-1 resize-none rounded-xl border-2 border-[#191919] bg-[#F8F8F4] px-3 py-2.5 text-sm font-bold leading-5 outline-none transition-colors placeholder:text-[#191919]/35 focus:border-[#2B5CFF]"
-              value={instruction}
-              onChange={(event) => setInstruction(event.target.value)}
-              disabled={operationBusy || Boolean(pendingTaskCompletion)}
+              defaultValue={restoredContext.instruction}
+              onInput={(event) => updateInstructionDraft(event.currentTarget.value)}
+              disabled={operationBusy || hasInlineConfirmation}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
+                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
                   event.preventDefault()
                   void requestPlan()
                 }
               }}
               placeholder="告诉小绝要做什么"
+              maxLength={3000}
               rows={1}
             />
-            <button className="assistant-send-button" type="submit" disabled={!instruction.trim() || operationBusy || Boolean(pendingTaskCompletion)} title="发送" aria-label="发送">
+            <button className="assistant-send-button" type="submit" disabled={!hasInstruction || operationBusy || hasInlineConfirmation} title="发送" aria-label="发送">
               {busy ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
             </button>
           </div>

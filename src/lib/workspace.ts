@@ -9,7 +9,9 @@ export interface WorkspaceStatus {
   authMessage?: string
   loginCommand?: string
   requiredScopes?: Record<string, string[]>
+  optionalScopes?: Record<string, string[]>
   missingScopes?: string[]
+  missingOptionalScopes?: string[]
 }
 
 export interface ApprovalItem {

@@ -24,10 +24,14 @@ const REQUIRED_SCOPES = {
     'calendar:calendar.event:read',
     'calendar:calendar.event:create',
     'calendar:calendar.event:update',
-    'calendar:calendar.free_busy:read',
   ],
 }
-const PRIMARY_CALENDAR_ID = '<primary>'
+// Optional calendar capabilities must not prevent the rest of the workspace from becoming ready.
+const OPTIONAL_SCOPES = {
+  calendar: ['calendar:calendar.free_busy:read'],
+}
+// The user API accepts `primary`; lark-cli 1.0.53's `<primary>` expansion is rejected with 191001.
+const PRIMARY_CALENDAR_ID = 'primary'
 
 class WorkspaceError extends Error {
   constructor(message, { code = 'WORKSPACE_ERROR', status = 500, hint = '', details = null } = {}) {
@@ -253,7 +257,12 @@ async function getWorkspaceStatus() {
     version = String(stdout).trim().replace(/^(?:lark-cli\s*)?version\s*/i, '')
   } catch (err) {
     if (err?.code === 'ENOENT') {
-      return { cliInstalled: false, userAvailable: false, requiredScopes: REQUIRED_SCOPES }
+      return {
+        cliInstalled: false,
+        userAvailable: false,
+        requiredScopes: REQUIRED_SCOPES,
+        optionalScopes: OPTIONAL_SCOPES,
+      }
     }
   }
   try {
@@ -268,7 +277,9 @@ async function getWorkspaceStatus() {
   }
   const user = auth?.identities?.user || {}
   const userAvailable = Boolean(user.available)
-  const allScopes = Object.values(REQUIRED_SCOPES).flat()
+  const requiredScopeList = Object.values(REQUIRED_SCOPES).flat()
+  const optionalScopeList = Object.values(OPTIONAL_SCOPES).flat()
+  const allScopes = [...requiredScopeList, ...optionalScopeList]
   if (userAvailable) {
     try {
       const { stdout } = await execFileAsync(
@@ -286,7 +297,9 @@ async function getWorkspaceStatus() {
     }
   }
   const missingScopes = Array.isArray(scopeCheck?.missing) ? scopeCheck.missing : []
-  const ready = userAvailable && missingScopes.length === 0
+  const missingRequiredScopes = missingScopes.filter((scope) => requiredScopeList.includes(scope))
+  const missingOptionalScopes = missingScopes.filter((scope) => optionalScopeList.includes(scope))
+  const ready = userAvailable && missingRequiredScopes.length === 0
   return {
     cliInstalled: true,
     version,
@@ -295,9 +308,13 @@ async function getWorkspaceStatus() {
     tokenStatus: String(user.tokenStatus || user.status || 'unknown'),
     authMessage: String(user.message || ''),
     requiredScopes: REQUIRED_SCOPES,
-    missingScopes,
-    loginCommand: missingScopes.length
-      ? `lark-cli auth login --scope "${missingScopes.join(' ')}"`
+    optionalScopes: OPTIONAL_SCOPES,
+    missingScopes: missingRequiredScopes,
+    missingOptionalScopes,
+    loginCommand: missingRequiredScopes.length
+      ? `lark-cli auth login --scope "${missingRequiredScopes.join(' ')}"`
+      : missingOptionalScopes.length
+        ? `lark-cli auth login --scope "${missingOptionalScopes.join(' ')}"`
       : `lark-cli auth login --scope "${allScopes.join(' ')}"`,
   }
 }
@@ -435,25 +452,29 @@ async function listAgenda({ start, end } = {}) {
   const startValue = cleanDate(start, '开始时间')
   const endValue = cleanDate(end, '结束时间')
   return runLark(
-    cliArgs(['calendar', '+agenda'], { start: startValue, end: endValue, 'calendar-id': 'primary' }),
+    cliArgs(['calendar', '+agenda'], {
+      start: startValue,
+      end: endValue,
+      'calendar-id': PRIMARY_CALENDAR_ID,
+    }),
   )
 }
 
 function cleanAttendees(value) {
-  const list = Array.isArray(value)
-    ? value
-    : String(value || '')
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean)
+  const source = Array.isArray(value) ? value : [value]
+  const list = source
+    .flatMap((item) => String(item || '').split(/[,，;；\s]+/))
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item, index, items) => items.indexOf(item) === index)
   if (list.length > 100) {
     throw new WorkspaceError('一次最多添加 100 位参与人', { code: 'INVALID_INPUT', status: 400 })
   }
   return list.map((id) => {
     const text = cleanString(id, '参与人 ID', { required: true, max: 100 })
-    if (text.startsWith('ou_')) return { type: 'user', user_id: text }
-    if (text.startsWith('oc_')) return { type: 'chat', chat_id: text }
-    if (text.startsWith('omm_')) return { type: 'resource', room_id: text }
+    if (/^ou_[A-Za-z0-9_-]+$/.test(text)) return { type: 'user', user_id: text }
+    if (/^oc_[A-Za-z0-9_-]+$/.test(text)) return { type: 'chat', chat_id: text }
+    if (/^omm_[A-Za-z0-9_-]+$/.test(text)) return { type: 'resource', room_id: text }
     throw new WorkspaceError(`无法识别参与人 ID：${text}`, {
       code: 'INVALID_ATTENDEE_ID',
       status: 400,
@@ -523,17 +544,32 @@ async function createCalendarEvent(input) {
     }),
   )
   const eventId = event?.event?.event_id || event?.event_id
+  if (!eventId) {
+    throw new WorkspaceError('飞书创建日程成功，但没有返回日程 ID', {
+      code: 'INVALID_CLI_RESPONSE',
+      status: 502,
+    })
+  }
   if (attendees.length && eventId) {
-    await runLark(
-      cliArgs(['calendar', 'event.attendees', 'create'], {
-        params: JSON.stringify({
-          calendar_id: PRIMARY_CALENDAR_ID,
-          event_id: eventId,
-          user_id_type: 'open_id',
+    try {
+      await runLark(
+        cliArgs(['calendar', 'event.attendees', 'create'], {
+          params: JSON.stringify({
+            calendar_id: PRIMARY_CALENDAR_ID,
+            event_id: eventId,
+            user_id_type: 'open_id',
+          }),
+          data: JSON.stringify({ attendees, need_notification: true }),
         }),
-        data: JSON.stringify({ attendees, need_notification: true }),
-      }),
-    )
+      )
+    } catch (err) {
+      throw new WorkspaceError(`日程已创建，但邀请参与人失败（event_id: ${eventId}）`, {
+        code: 'ATTENDEE_INVITE_FAILED',
+        status: 502,
+        hint: err?.hint || err?.message || '请在飞书日程详情中补充参与人',
+        details: { eventId },
+      })
+    }
   }
   return event
 }
@@ -600,4 +636,5 @@ module.exports = {
   createCalendarEvent,
   updateCalendarEvent,
   suggestCalendarTime,
+  OPTIONAL_SCOPES,
 }

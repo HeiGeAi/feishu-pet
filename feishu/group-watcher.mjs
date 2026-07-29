@@ -18,9 +18,10 @@
  * PET_REPORT_DRYRUN=1 时只推给宠物看板，不发飞书（联调用）。
  * 每天 18:00 自动发一份日报。
  *
- * 用法：node feishu/group-watcher.mjs
- * 环境变量：PET_CHAT_ID（必配，要监听的群 chat_id，oc_ 开头）
- *           PET_MY_OPEN_ID（必配，主人自己的 open_id，ou_ 开头，用于识别 @我 和自己发的消息）
+ * 用法：node feishu/group-watcher.mjs                         # 长驻监工
+ *       node feishu/group-watcher.mjs --job summary:6 --label "6 小时消息总结" # 一次性任务
+ * 环境变量：PET_CHAT_ID（可选，要重点监听的群 chat_id，oc_ 开头）
+ *           PET_MY_OPEN_ID（可选，默认从 lark-cli auth status 自动读取）
  *           PET_URL（默认 http://localhost:7100） PET_LLM_MODEL（覆盖模型名）
  *           PET_REPORT_DRYRUN=1（不发飞书，只上看板，联调用）
  */
@@ -28,7 +29,8 @@
 import { execFile } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
@@ -48,21 +50,120 @@ const { llmChat, loadLlmConfig } = require('./llm-client.cjs')
 const run = promisify(execFile)
 
 const PET_URL = (process.env.PET_URL || 'http://localhost:7100').replace(/\/$/, '')
-const CHAT_ID = process.env.PET_CHAT_ID || ''
-const MY_OPEN_ID = process.env.PET_MY_OPEN_ID || ''
-if (!CHAT_ID || !MY_OPEN_ID) {
-  console.error('请先配置环境变量：PET_CHAT_ID（监听的群 chat_id）和 PET_MY_OPEN_ID（你的 open_id）。')
-  console.error('获取方式：lark-cli im +chat-list --as user 找 chat_id；lark-cli contact +me --as user 找 open_id。')
-  process.exit(1)
-}
+let CHAT_ID = process.env.PET_CHAT_ID || ''
+let MY_OPEN_ID = process.env.PET_MY_OPEN_ID || ''
 const POLL_SEC = 15
 const DAILY_HOUR = 18
 const DRYRUN = process.env.PET_REPORT_DRYRUN === '1'
 const LARK = process.env.LARK_CLI || 'lark-cli'
 const LARK_ENV = {
   ...process.env,
+  // Finder 启动 Electron 时 PATH 很短，需要显式补上常见 CLI 安装目录。
+  PATH: `${homedir()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ''}`,
   LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1',
   LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1',
+}
+
+class WatcherError extends Error {
+  constructor(message, { code = 'WATCHER_ERROR', hint = '', missingScopes = [] } = {}) {
+    super(message)
+    this.name = 'WatcherError'
+    this.code = code
+    this.hint = hint
+    this.missingScopes = missingScopes
+  }
+}
+
+function parseJson(text) {
+  const source = String(text || '').trim()
+  if (!source) return {}
+  try {
+    return JSON.parse(source)
+  } catch {
+    const starts = [source.indexOf('{'), source.indexOf('[')].filter((index) => index >= 0)
+    const start = starts.length ? Math.min(...starts) : -1
+    const end = Math.max(source.lastIndexOf('}'), source.lastIndexOf(']'))
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(source.slice(start, end + 1))
+      } catch {
+        /* fall through */
+      }
+    }
+    throw new WatcherError('飞书 CLI 返回了无法解析的数据', { code: 'INVALID_CLI_RESPONSE' })
+  }
+}
+
+function errorFromEnvelope(envelope, fallback = '飞书 CLI 调用失败') {
+  const detail = envelope?.error || {}
+  const missingScopes = Array.isArray(detail.missing_scopes)
+    ? detail.missing_scopes.map(String).filter(Boolean)
+    : []
+  const message = String(detail.message || envelope?.msg || fallback)
+  const lowered = `${detail.type || ''} ${detail.subtype || ''} ${message}`.toLowerCase()
+  let code = String(detail.type || 'CLI_ERROR').toUpperCase()
+  if (missingScopes.length || lowered.includes('missing_scope') || lowered.includes('permission')) {
+    code = 'PERMISSION_REQUIRED'
+  } else if (
+    lowered.includes('not logged') ||
+    lowered.includes('needs login') ||
+    lowered.includes('credential') ||
+    lowered.includes('token expired')
+  ) {
+    code = 'AUTH_REQUIRED'
+  } else if (lowered.includes('network') || lowered.includes('dns')) {
+    code = 'NETWORK_ERROR'
+  }
+  return new WatcherError(message, {
+    code,
+    hint: String(detail.hint || envelope?.hint || ''),
+    missingScopes,
+  })
+}
+
+function normalizeCliError(err) {
+  if (err instanceof WatcherError) return err
+  for (const candidate of [err?.stderr, err?.stdout]) {
+    try {
+      const envelope = parseJson(candidate)
+      if (envelope?.error || envelope?.ok === false) return errorFromEnvelope(envelope)
+    } catch {
+      /* 非 JSON 错误继续判断 */
+    }
+  }
+  if (err?.code === 'ENOENT') {
+    return new WatcherError('未找到 lark-cli，请先安装并完成登录', { code: 'CLI_NOT_FOUND' })
+  }
+  if (err?.killed || /timed?\s*out|timeout/i.test(String(err?.message || ''))) {
+    return new WatcherError('飞书 CLI 响应超时', { code: 'CLI_TIMEOUT' })
+  }
+  return new WatcherError(String(err?.message || '飞书 CLI 调用失败').slice(0, 500), {
+    code: 'CLI_ERROR',
+  })
+}
+
+async function runLarkJson(args, { timeout = 40_000, maxBuffer = 8 * 1024 * 1024 } = {}) {
+  try {
+    const { stdout } = await run(LARK, args, { timeout, maxBuffer, env: LARK_ENV })
+    const data = parseJson(stdout)
+    if (data?.ok === false || data?.error) throw errorFromEnvelope(data)
+    return data
+  } catch (err) {
+    throw normalizeCliError(err)
+  }
+}
+
+async function resolveMyOpenId(runCommand = runLarkJson) {
+  if (/^ou_[A-Za-z0-9]+$/.test(MY_OPEN_ID)) return MY_OPEN_ID
+  const auth = await runCommand(['auth', 'status', '--json'], { timeout: 5000 })
+  const openId = String(auth?.identities?.user?.openId || '')
+  if (!/^ou_[A-Za-z0-9]+$/.test(openId)) {
+    throw new WatcherError('无法读取当前飞书用户，请先完成 lark-cli 用户登录', {
+      code: 'AUTH_REQUIRED',
+    })
+  }
+  MY_OPEN_ID = openId
+  return MY_OPEN_ID
 }
 
 const CELEBRATE_WORDS = ['恭喜', '获奖', '中奖', '开奖', '颁奖', '🎉', '太强', '牛啊']
@@ -82,6 +183,16 @@ const INBOX = process.env.PET_INBOX !== '0' // 默认开
 const INBOX_CHATS = Number(process.env.PET_INBOX_CHATS || 6)
 const inboxSeen = new Map() // chat_id -> 最新 message_id
 let inboxFirst = true
+
+// lark-cli 1.0.53 的消息 shortcut 会预检下列 scope（即使传了 --no-reactions）。
+const MESSAGE_READ_SCOPES = [
+  'im:chat:read',
+  'im:message.history:readonly',
+  'im:message.group_msg:get_as_user',
+  'im:message.p2p_msg:get_as_user',
+  'im:message.reactions:read',
+  'contact:user.base:readonly',
+]
 
 // ── 宠物 API ─────────────────────────────────────
 async function post(path, body) {
@@ -155,7 +266,7 @@ async function llmSummarize(lines) {
     '3. 如果有需要黑哥留意或回复的事，单独一行用「⚠️ 记得看：」开头；没有就不写\n' +
     '4. 全文不超过 200 字，口语化，轻松一点，可带一两个 emoji，用简体中文\n\n聊天记录：\n' +
     lines.join('\n')
-  return llmChat(prompt)
+  return llmChat(prompt, { maxTokens: 500, reasoningEffort: 'low' })
 }
 
 function fallbackSummary(msgs) {
@@ -173,15 +284,16 @@ function fallbackSummary(msgs) {
 async function sendFeishu(text) {
   if (DRYRUN) return 'dryrun'
   const md = `**🐾 小绝 · 组委会群汇报**\n\n${text}`
-  for (const target of [['--chat-id', CHAT_ID], ['--user-id', MY_OPEN_ID]]) {
+  const targets = []
+  if (/^oc_[A-Za-z0-9]+$/.test(CHAT_ID)) targets.push(['--chat-id', CHAT_ID])
+  if (/^ou_[A-Za-z0-9]+$/.test(MY_OPEN_ID)) targets.push(['--user-id', MY_OPEN_ID])
+  for (const target of targets) {
     try {
-      const { stdout } = await run(
-        LARK,
+      await runLarkJson(
         ['im', '+messages-send', '--as', 'bot', ...target, '--markdown', md],
-        { timeout: 40_000, env: LARK_ENV },
+        { timeout: 40_000 },
       )
-      const data = JSON.parse(stdout)
-      if (data.ok) return target[0] === '--chat-id' ? '群内' : '私聊'
+      return target[0] === '--chat-id' ? '群内' : '私聊'
     } catch (err) {
       console.warn('[report] 发送失败:', err.message)
     }
@@ -232,15 +344,13 @@ async function summarize(trigger = '手动') {
 
 // ── 轮询 ─────────────────────────────────────────
 async function fetchMessages() {
-  const { stdout } = await run(
-    LARK,
+  if (!/^oc_[A-Za-z0-9]+$/.test(CHAT_ID)) return []
+  const data = await runLarkJson(
     ['im', '+chat-messages-list', '--as', 'user', '--chat-id', CHAT_ID,
      '--page-size', '20', '--order', 'desc', '--no-reactions'],
-    { timeout: 40_000, env: LARK_ENV, maxBuffer: 4 * 1024 * 1024 },
+    { timeout: 40_000, maxBuffer: 4 * 1024 * 1024 },
   )
-  const data = JSON.parse(stdout)
-  if (!data.ok) throw new Error(data.error?.message || 'lark-cli error')
-  return data.data.messages
+  return data.data?.messages || []
 }
 
 async function pollOnce(first) {
@@ -292,15 +402,12 @@ async function pollOnce(first) {
 
 // ── 收件箱扫描：私聊 + 最近活跃的群，新消息冒气泡 ──
 async function scanInbox() {
-  const { stdout } = await run(
-    LARK,
+  const data = await runLarkJson(
     ['im', '+chat-list', '--as', 'user', '--types', 'p2p,group',
      '--sort', 'active_time', '--page-size', String(INBOX_CHATS + 1)],
-    { timeout: 40_000, env: LARK_ENV, maxBuffer: 4 * 1024 * 1024 },
+    { timeout: 40_000, maxBuffer: 4 * 1024 * 1024 },
   )
-  const data = JSON.parse(stdout)
-  if (!data.ok) throw new Error(data.error?.message || 'lark-cli chat-list error')
-  const chats = (data.data.chats || [])
+  const chats = (data.data?.chats || [])
     .filter((c) => c.chat_id !== CHAT_ID) // 组委会群由详细轮询负责
     .slice(0, INBOX_CHATS)
 
@@ -308,15 +415,13 @@ async function scanInbox() {
 
   for (const chat of chats) {
     try {
-      const { stdout: out } = await run(
-        LARK,
+      const d = await runLarkJson(
         ['im', '+chat-messages-list', '--as', 'user', '--chat-id', chat.chat_id,
          '--page-size', '1', '--order', 'desc', '--no-reactions'],
-        { timeout: 40_000, env: LARK_ENV, maxBuffer: 4 * 1024 * 1024 },
+        { timeout: 40_000, maxBuffer: 4 * 1024 * 1024 },
       )
-      const d = JSON.parse(out)
       const m = d.data?.messages?.[0]
-      if (!d.ok || !m || m.deleted) continue
+      if (!m || m.deleted) continue
       const prev = inboxSeen.get(chat.chat_id)
       inboxSeen.set(chat.chat_id, m.message_id)
       // PET_INBOX_TEST=1：强制把最新消息当新消息，联调提醒链路用
@@ -349,63 +454,97 @@ async function scanInbox() {
 // ── 小绝的绝活：待办整理 + N 小时消息总结 ──
 let cmdBusy = false
 
-async function fetchMessagesSince(chatId, startIso, limit = 50) {
-  const { stdout } = await run(
-    LARK,
+async function fetchMessagesSince(chatId, startIso, limit = 50, runCommand = runLarkJson) {
+  const data = await runCommand(
     ['im', '+chat-messages-list', '--as', 'user', '--chat-id', chatId,
      '--start', startIso, '--page-size', String(limit), '--order', 'desc', '--no-reactions'],
-    { timeout: 40_000, env: LARK_ENV, maxBuffer: 8 * 1024 * 1024 },
+    { timeout: 40_000, maxBuffer: 8 * 1024 * 1024 },
   )
-  const data = JSON.parse(stdout)
-  if (!data.ok) throw new Error(data.error?.message || 'lark-cli error')
-  return data.data.messages || []
+  return data.data?.messages || []
+}
+
+function formatMessageTime(value) {
+  const source = String(value || '')
+  const epoch = /^\d{10,13}$/.test(source)
+    ? Number(source) * (source.length === 10 ? 1000 : 1)
+    : Date.parse(source)
+  if (Number.isFinite(epoch)) {
+    const parts = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(new Date(epoch))
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+    return `${values.month}-${values.day} ${values.hour}:${values.minute}`
+  }
+  return source.slice(0, 16)
 }
 
 /** 拉过去 N 小时内的消息（组委会群 + 最近活跃会话），汇总成行 */
-async function collectLines(hours) {
+async function collectLines(hours, {
+  runCommand = runLarkJson,
+  configuredChatId = CHAT_ID,
+  inboxChats = INBOX_CHATS,
+  classifyMessage = classify,
+} = {}) {
   const startIso = new Date(Date.now() - hours * 3600_000).toISOString()
-  const chatIds = [{ id: CHAT_ID, name: '组委会群' }]
+  const chatIds = []
+  const hasConfiguredChat = /^oc_[A-Za-z0-9]+$/.test(configuredChatId)
+  if (hasConfiguredChat) {
+    chatIds.push({ id: configuredChatId, name: '配置的重点群' })
+  }
+  const failures = []
   try {
-    const { stdout } = await run(
-      LARK,
+    const data = await runCommand(
       ['im', '+chat-list', '--as', 'user', '--types', 'p2p,group',
-       '--sort', 'active_time', '--page-size', String(INBOX_CHATS + 1)],
-      { timeout: 40_000, env: LARK_ENV, maxBuffer: 4 * 1024 * 1024 },
+       '--sort', 'active_time', '--page-size', String(inboxChats + 1)],
+      { timeout: 40_000, maxBuffer: 4 * 1024 * 1024 },
     )
-    const data = JSON.parse(stdout)
     for (const c of (data.data?.chats || [])) {
-      if (c.chat_id !== CHAT_ID && chatIds.length <= INBOX_CHATS) {
-        chatIds.push({ id: c.chat_id, name: c.chat_mode === 'p2p' ? `私聊·${c.name}` : c.name })
-      }
+      if (!/^oc_[A-Za-z0-9]+$/.test(c.chat_id)) continue
+      if (c.chat_id === configuredChatId || chatIds.length >= inboxChats + Number(hasConfiguredChat)) continue
+      const name = String(c.name || '未命名会话')
+      chatIds.push({ id: c.chat_id, name: c.chat_mode === 'p2p' ? `私聊·${name}` : name })
     }
   } catch (err) {
-    console.warn('[job] chat-list 失败，只用组委会群:', err.message)
+    const normalized = normalizeCliError(err)
+    failures.push(normalized)
+    if (!chatIds.length) throw normalized
+    console.warn('[job] chat-list 失败，只读取已配置的重点群:', normalized.message)
   }
   const lines = []
+  let fetchedChats = 0
   for (const c of chatIds) {
     try {
-      const msgs = await fetchMessagesSince(c.id, startIso)
+      const msgs = await fetchMessagesSince(c.id, startIso, 50, runCommand)
+      fetchedChats++
       for (const m of msgs.reverse()) {
         if (m.deleted) continue
-        const e = classify(m)
-        lines.push(`${(m.create_time || '').slice(5)} [${c.name}] ${e.name}: ${e.text}`)
+        const e = classifyMessage(m)
+        lines.push(`${formatMessageTime(m.create_time)} [${c.name}] ${e.name}: ${e.text}`)
       }
     } catch (err) {
-      console.warn(`[job] 拉取 ${c.name} 失败: ${err.message}`)
+      const normalized = normalizeCliError(err)
+      failures.push(normalized)
+      console.warn(`[job] 拉取 ${c.name} 失败: ${normalized.message}`)
     }
   }
+  if (!fetchedChats && failures.length) throw failures[0]
   return lines.slice(-300)
 }
 
 async function sendFeishuUser(md) {
   if (DRYRUN) return 'dryrun'
+  if (!/^ou_[A-Za-z0-9]+$/.test(MY_OPEN_ID)) return null
   try {
-    const { stdout } = await run(
-      LARK,
+    await runLarkJson(
       ['im', '+messages-send', '--as', 'bot', '--user-id', MY_OPEN_ID, '--markdown', md],
-      { timeout: 40_000, env: LARK_ENV },
+      { timeout: 40_000 },
     )
-    if (JSON.parse(stdout).ok) return '私聊'
+    return '私聊'
   } catch (err) {
     console.warn('[job] 私聊发送失败:', err.message)
   }
@@ -415,6 +554,7 @@ async function sendFeishuUser(md) {
 async function runSummaryJob(hours, mode, label) {
   const modeName = mode === 'todo' ? '整理今日待办' : `总结过去 ${hours} 小时`
   await post('/api/event', { state: 'working', label: `${modeName} · 正在捞消息…`, source: 'watcher' })
+  await resolveMyOpenId()
   const lines = await collectLines(hours)
   let full
   if (!lines.length) {
@@ -430,9 +570,11 @@ async function runSummaryJob(hours, mode, label) {
           '请做一份消息总结：\n1. 第一行一句话概括整体动态\n2. 按会话/主题分 3-6 条要点，每条一行，说清谁在聊什么、有什么结论或进展\n' +
           '3. 有需要黑哥留意的事单独一行「⚠️ 记得看：」指出；没有就不写\n4. 不超过 250 字，口语化，可带一两个 emoji，简体中文\n\n消息记录：\n' + lines.join('\n')
     try {
-      full = await llmChat(prompt)
-    } catch {
-      full = `总结引擎打盹了。过去 ${hours} 小时共捞到 ${lines.length} 条消息，稍后再让我试一次。`
+      full = await llmChat(prompt, { maxTokens: 600, reasoningEffort: 'low' })
+    } catch (err) {
+      throw new WatcherError(`大模型总结失败：${String(err?.message || err).slice(0, 300)}`, {
+        code: 'LLM_ERROR',
+      })
     }
   }
   const md = `**🐾 小绝 · ${label || modeName}**\n\n${full}`
@@ -442,10 +584,44 @@ async function runSummaryJob(hours, mode, label) {
   await post('/api/event', { state: 'success', label: `${modeName}完成 · ${note}`, source: 'watcher' })
 }
 
-async function handleCommand(cmd) {
+function formatJobFailure(err) {
+  const error = err instanceof Error ? err : new Error(String(err || '未知错误'))
+  if (error.code === 'PERMISSION_REQUIRED') {
+    const scopes = [...new Set([...MESSAGE_READ_SCOPES, ...(error.missingScopes || [])])]
+      .filter((scope) => /^[A-Za-z0-9:._-]+$/.test(scope))
+    const command = `lark-cli auth login --scope "${scopes.join(' ')}"`
+    return {
+      label: '消息总结缺少飞书读取权限',
+      report: `无法读取飞书消息：当前应用或用户缺少消息读取权限。\n\n请先在飞书开放平台开通同名 scope，再执行：\n${command}`,
+      code: error.code,
+      command,
+    }
+  }
+  if (error.code === 'AUTH_REQUIRED') {
+    return {
+      label: '需要重新登录飞书 CLI',
+      report: `无法读取飞书消息：${error.message}\n\n请完成 lark-cli 用户登录后重试。`,
+      code: error.code,
+    }
+  }
+  if (error.code === 'LLM_ERROR') {
+    return {
+      label: '消息已读取，但大模型总结失败',
+      report: `${error.message}\n\n请在看板的“大模型设置”中选择已登录的 Codex / Claude CLI，或配置可用的 API Key。`,
+      code: error.code,
+    }
+  }
+  return {
+    label: `消息总结失败：${error.message.slice(0, 32)}`,
+    report: `消息总结失败：${error.message}${error.hint ? `\n\n${error.hint}` : ''}`,
+    code: error.code || 'SUMMARY_FAILED',
+  }
+}
+
+async function handleCommand(cmd, { runJob = runSummaryJob, postResult = post } = {}) {
   if (cmdBusy) {
-    await post('/api/event', { state: 'error', label: '上一个绝活还没演完，稍等…', source: 'watcher' })
-    return
+    await postResult('/api/event', { state: 'error', label: '上一个绝活还没演完，稍等…', source: 'watcher' })
+    return { ok: false, code: 'BUSY' }
   }
   cmdBusy = true
   try {
@@ -453,16 +629,26 @@ async function handleCommand(cmd) {
       const todayStart = new Date()
       todayStart.setHours(0, 0, 0, 0)
       const hours = Math.round(Math.max(1, (Date.now() - todayStart.getTime()) / 3600_000) * 10) / 10
-      await runSummaryJob(hours, 'todo', cmd.label)
+      await runJob(hours, 'todo', cmd.label)
     } else if (cmd.command?.startsWith('summary:')) {
       const h = [6, 12, 24].includes(Number(cmd.command.split(':')[1]))
         ? Number(cmd.command.split(':')[1])
         : 6
-      await runSummaryJob(h, 'summary', cmd.label)
+      await runJob(h, 'summary', cmd.label)
+    } else {
+      throw new WatcherError('不支持的消息总结指令', { code: 'INVALID_COMMAND' })
     }
+    return { ok: true }
   } catch (err) {
     console.warn('[cmd] 执行失败:', err.message)
-    await post('/api/event', { state: 'error', label: `绝活演砸了：${String(err.message).slice(0, 30)}`, source: 'watcher' })
+    const failure = formatJobFailure(err)
+    await postResult('/api/report', {
+      text: failure.report,
+      trigger: cmd.label || '消息总结',
+      source: 'watcher',
+    })
+    await postResult('/api/event', { state: 'error', label: failure.label, source: 'watcher' })
+    return { ok: false, code: failure.code, error: err, command: failure.command }
   } finally {
     cmdBusy = false
   }
@@ -511,21 +697,53 @@ async function listenCommands() {
   }
 }
 
-async function main() {
+function parseRunOptions(argv = []) {
+  const args = Array.isArray(argv) ? argv.map(String) : []
+  const valueOf = (name) => {
+    const exact = args.indexOf(name)
+    if (exact >= 0) return args[exact + 1] || ''
+    const prefix = `${name}=`
+    return args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length) || ''
+  }
+  const job = valueOf('--job')
+  if (job && !['todo', 'summary:6', 'summary:12', 'summary:24'].includes(job)) {
+    throw new WatcherError(`不支持的消息总结指令：${job.slice(0, 40)}`, {
+      code: 'INVALID_COMMAND',
+    })
+  }
+  return {
+    job,
+    label: valueOf('--label').slice(0, 80),
+    reportNow: args.includes('--report-now'),
+  }
+}
+
+async function main(argv = process.argv.slice(2)) {
+  const options = parseRunOptions(argv)
   const { provider, model } = loadLlmConfig()
   const llmDesc = provider === 'api' ? model : `${provider} CLI`
+  if (options.job) {
+    console.log(`🐾 小绝一次性任务启动 → ${options.job}（LLM ${llmDesc}${DRYRUN ? '，DRYRUN 不发飞书' : ''}）`)
+    const result = await handleCommand({ command: options.job, label: options.label })
+    if (!result.ok) process.exitCode = 1
+    return result
+  }
+
+  await resolveMyOpenId()
   console.log(`🐾 小绝群监工启动 → ${PET_URL}（轮询 ${POLL_SEC}s，日报 ${DAILY_HOUR}:00，LLM ${llmDesc}${DRYRUN ? '，DRYRUN 不发飞书' : ''}${INBOX ? `，收件箱扫描 ${INBOX_CHATS} 个会话` : ''}，绝活指令监听中）`)
+  if (!CHAT_ID) console.log('[poller] 未配置 PET_CHAT_ID，跳过单个重点群监控，收件箱和消息总结仍可用')
   listenCommands()
   let first = true
-  const reportNow = process.argv.includes('--report-now')
   for (;;) {
-    try {
-      await pollOnce(first)
-      if (first && reportNow) summarize('手动测试')
-      first = false
-    } catch (err) {
-      console.warn('[poller] 本轮失败:', err.message)
+    if (CHAT_ID) {
+      try {
+        await pollOnce(first)
+        if (first && options.reportNow) summarize('手动测试')
+      } catch (err) {
+        console.warn('[poller] 本轮失败:', err.message)
+      }
     }
+    first = false
     if (INBOX) {
       try {
         await scanInbox()
@@ -544,4 +762,27 @@ async function main() {
   }
 }
 
-main()
+export {
+  MESSAGE_READ_SCOPES,
+  WatcherError,
+  collectLines,
+  errorFromEnvelope,
+  formatJobFailure,
+  handleCommand,
+  normalizeCliError,
+  parseJson,
+  parseRunOptions,
+  resolveMyOpenId,
+  runSummaryJob,
+}
+
+const currentFile = fileURLToPath(import.meta.url)
+if (process.argv[1] && resolve(process.argv[1]) === currentFile) {
+  main().catch(async (err) => {
+    console.error('[watcher] 启动失败:', err.message)
+    const failure = formatJobFailure(err)
+    await post('/api/report', { text: failure.report, trigger: '消息总结', source: 'watcher' })
+    await post('/api/event', { state: 'error', label: failure.label, source: 'watcher' })
+    process.exitCode = 1
+  })
+}

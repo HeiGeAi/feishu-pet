@@ -19,6 +19,7 @@ const {
   nativeImage,
   globalShortcut,
 } = require('electron')
+const { spawn } = require('node:child_process')
 const path = require('path')
 const { startPetServer } = require('./server.cjs')
 
@@ -30,6 +31,9 @@ let tray = null
 let alwaysOnTop = true
 let clickThrough = false
 let dragOffset = null
+let petOverviewExpanded = false
+let petOverviewRestoreBounds = null
+let summaryJobChild = null
 
 // 体型档位：窗口尺寸 + 渲染缩放
 const SIZES = {
@@ -63,20 +67,114 @@ function setSkin(patch) {
 
 /** 小绝的绝活：让 watcher 去飞书捞消息干活 */
 function runJob(command, label) {
-  fetch(`http://localhost:${PORT}/api/command`, {
+  if (summaryJobChild && summaryJobChild.exitCode === null) {
+    fetch(`http://127.0.0.1:${PORT}/api/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        state: 'error',
+        label: '上一个消息总结还在进行，请稍等',
+        source: 'desktop',
+      }),
+    }).catch(() => {})
+    return
+  }
+
+  // 记录菜单操作，但不广播给可能仍在运行的常驻 watcher；本次由下方一次性进程执行。
+  fetch(`http://127.0.0.1:${PORT}/api/command`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Feishu-Pet-Request': '1' },
-    body: JSON.stringify({ command, label, source: 'menu' }),
+    body: JSON.stringify({ command, label, source: 'menu', dispatch: false }),
   }).catch(() => {})
+
+  const projectDir = path.join(__dirname, '..')
+  const workerPath = path.join(projectDir, 'feishu', 'group-watcher.mjs')
+  const child = spawn(process.execPath, [workerPath, '--job', command, '--label', label], {
+    cwd: projectDir,
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+      PET_URL: `http://127.0.0.1:${PORT}`,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  summaryJobChild = child
+  child.stdout.on('data', (chunk) => console.log(`[summary] ${String(chunk).trimEnd()}`))
+  child.stderr.on('data', (chunk) => console.warn(`[summary] ${String(chunk).trimEnd()}`))
+  child.once('error', (err) => {
+    if (summaryJobChild === child) summaryJobChild = null
+    console.warn('[summary] 无法启动消息总结:', err.message)
+    fetch(`http://127.0.0.1:${PORT}/api/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: 'error', label: '消息总结启动失败', source: 'desktop' }),
+    }).catch(() => {})
+  })
+  child.once('exit', (code, signal) => {
+    if (summaryJobChild === child) summaryJobChild = null
+    if (code && signal !== 'SIGTERM') {
+      console.warn(`[summary] 消息总结进程退出，code=${code}`)
+    }
+  })
 }
 
 function setSize(name) {
   currentSize = name
   const s = SIZES[name]
   if (!win || !s) return
+  if (petOverviewExpanded && petOverviewRestoreBounds) {
+    win.setBounds(petOverviewRestoreBounds)
+    petOverviewExpanded = false
+    petOverviewRestoreBounds = null
+  }
   win.setSize(s.w, s.h)
   win.webContents.send('set-scale', s.scale)
   refreshTray()
+}
+
+/** 悬停概览需要比宠物本体更大的透明画布；扩展时保持宠物的右下锚点不跳动。 */
+function resizePetOverview(expanded) {
+  if (!win || win.isDestroyed() || expanded === petOverviewExpanded) return
+  if (expanded) {
+    const base = win.getBounds()
+    const workArea = screen.getDisplayNearestPoint({
+      x: base.x + base.width - 1,
+      y: base.y + base.height - 1,
+    }).workArea
+    const width = Math.min(base.width + 340, workArea.width)
+    const height = Math.min(Math.max(base.height, 420), workArea.height)
+    const right = base.x + base.width
+    const bottom = base.y + base.height
+    const x = Math.min(
+      Math.max(right - width, workArea.x),
+      workArea.x + workArea.width - width,
+    )
+    const y = Math.min(
+      Math.max(bottom - height, workArea.y),
+      workArea.y + workArea.height - height,
+    )
+    petOverviewRestoreBounds = base
+    petOverviewExpanded = true
+    win.setBounds({ x, y, width, height })
+    return
+  }
+  const restore = petOverviewRestoreBounds
+  petOverviewExpanded = false
+  petOverviewRestoreBounds = null
+  if (restore) win.setBounds(restore)
+}
+
+async function loadPetOverviewPath(pathname) {
+  const response = await fetch(`http://127.0.0.1:${PORT}${pathname}`)
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`)
+  return body.data
+}
+
+function serializeOverviewResult(result) {
+  return result.status === 'fulfilled'
+    ? { ok: true, data: result.value }
+    : { ok: false, error: String(result.reason?.message || result.reason || '读取失败') }
 }
 
 function sendInteract(kind) {
@@ -372,6 +470,23 @@ ipcMain.on('skin-changed', (_e, v) => {
   if (v?.form) currentForm = v.form
 })
 ipcMain.on('open-assistant', () => createAssistantWindow())
+ipcMain.on('pet-overview-resize', (_e, expanded) => resizePetOverview(Boolean(expanded)))
+ipcMain.handle('pet-overview-load', async (_e, range) => {
+  const start = typeof range?.start === 'string' ? range.start.slice(0, 80) : ''
+  const end = typeof range?.end === 'string' ? range.end.slice(0, 80) : ''
+  const [approvalResult, taskResult, calendarResult] = await Promise.allSettled([
+    loadPetOverviewPath('/api/workspace/approvals'),
+    loadPetOverviewPath('/api/workspace/tasks'),
+    loadPetOverviewPath(
+      `/api/workspace/calendar/agenda?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,
+    ),
+  ])
+  return {
+    approvals: serializeOverviewResult(approvalResult),
+    tasks: serializeOverviewResult(taskResult),
+    calendar: serializeOverviewResult(calendarResult),
+  }
+})
 ipcMain.on('assistant-close', () => assistantWin?.close())
 ipcMain.on('assistant-resize', (_e, expanded) => {
   if (!assistantWin || assistantWin.isDestroyed()) return
@@ -438,9 +553,17 @@ function pollHitTest() {
   if (c.x >= b.x && c.x < b.x + b.width && c.y >= b.y && c.y < b.y + b.height) {
     const rx = c.x - b.x
     const ry = c.y - b.y
-    // 消息气泡可点击（跳飞书会话）
+    // 消息气泡和悬停概览可点击；其余透明区域继续穿透
+    const regions = Array.isArray(hitMask.regions) ? hitMask.regions : []
+    const inRegion = regions.some((region) => (
+      region && Number.isFinite(region.x) && Number.isFinite(region.y) &&
+      Number.isFinite(region.w) && Number.isFinite(region.h) &&
+      region.w > 0 && region.h > 0 &&
+      rx >= region.x && rx < region.x + region.w &&
+      ry >= region.y && ry < region.y + region.h
+    ))
     const bb = hitMask.bubble
-    if (bb && rx >= bb.x && rx < bb.x + bb.w && ry >= bb.y && ry < bb.y + bb.h) {
+    if (inRegion || (bb && rx >= bb.x && rx < bb.x + bb.w && ry >= bb.y && ry < bb.y + bb.h)) {
       inside = true
     } else {
       const s = hitMask.scale || 1
@@ -496,5 +619,6 @@ app.on('window-all-closed', () => {
 })
 
 app.on('will-quit', () => {
+  if (summaryJobChild && summaryJobChild.exitCode === null) summaryJobChild.kill('SIGTERM')
   globalShortcut.unregisterAll()
 })

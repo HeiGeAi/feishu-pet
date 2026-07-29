@@ -16,6 +16,10 @@ contextBridge.exposeInMainWorld('petAPI', {
   openChat: (chatId) => ipcRenderer.send('open-chat', chatId),
   /** 双击宠物打开小绝助手 */
   openAssistant: () => ipcRenderer.send('open-assistant'),
+  /** 悬停概览出现时临时扩大透明宠物窗口，收起后恢复原尺寸 */
+  resizePetOverview: (expanded) => ipcRenderer.send('pet-overview-resize', Boolean(expanded)),
+  /** file:// 宠物页通过主进程读取本地工作台，避免跨协议 CORS。 */
+  loadPetOverview: (range) => ipcRenderer.invoke('pet-overview-load', range),
   closeAssistant: () => ipcRenderer.send('assistant-close'),
   resizeAssistant: (expanded) => ipcRenderer.send('assistant-resize', Boolean(expanded)),
   openWorkbench: () => ipcRenderer.send('open-workbench'),

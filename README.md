@@ -2,9 +2,9 @@
 
 **飞书 bot 在替你干活，桌面上得有个小家伙让你看见它在干活。**
 
-| 桌面悬浮实拍 | 看板 · 干活中 | 看板 · 换装与设置 |
-|---|---|---|
-| ![桌面实拍](public/screenshots/desktop-intro.png) | ![干活中](public/screenshots/board-working.png) | ![换装设置](public/screenshots/board-skins.png) |
+| 悬停工作一览 · 默认两条 | 近期日程 · 独立展开 |
+|---|---|
+| ![悬停工作一览默认收起](public/screenshots/pet-overview-collapsed.png) | ![展开近期日程列表](public/screenshots/pet-overview-expanded.png) |
 
 > 小绝诞生于 2026 年 7 月 25 日 · 飞书绝活大会北京场，画风来自大会点位海报的贴纸语言。
 
@@ -42,10 +42,12 @@
 4. **大模型自己选**——看板里可视化切换 LLM 后端：自定义 OpenAI 兼容 API（baseUrl + key + model）、本机 Codex CLI、本机 Claude Code CLI。配置即存即用，不用重启。没有 key 的新用户直接选 CLI 模式，用自己已登录的账号就能跑。
 5. **消息归档看板**——宠物身上都是碎片化的气泡，想看全的时候打开 `http://localhost:7100/archive`（看板「事件日志」右上角和宠物右键菜单都有入口）：消息提醒 / 绝活汇报全文 / 干活指令，按天分组持久化归档，支持筛选和搜索，每条消息带「去飞书看 ↗」直达会话。
 6. **换装与形态**——5 套卡通贴纸皮肤（像素猫 / Q 版财神 / 小绿芽 / 彩虹独角兽 / 飞书配色小飞机）× 幼年 / 成年两种形态，右键即换，重启保持。
-7. **桌面宠物与小绝助手**——按住拖动、单击摸头、双击打开“小绝助手”。助手顶部可展开全部未完成待办、待审批和今日日程；待办可在二次确认后完成，审批可展开摘要并跳转飞书或网页工作台。`Esc` 会优先取消当前确认，没有待确认操作时才进入关闭流程。
+7. **桌面宠物与小绝助手**——按住拖动、单击摸头；鼠标悬停直接查看待办、待审批和未来 30 天日程，每栏默认显示 2 条并可独立展开；双击打开“小绝助手”。助手顶部可展开全部未完成待办、待审批和今日日程；待办可在二次确认后完成，审批可展开摘要并跳转飞书或网页工作台。`Esc` 会优先取消当前确认，没有待确认操作时才进入关闭流程。
 8. **飞书工作台**——`http://localhost:7100/workbench` 集中处理审批、任务和日程。审批支持递归解析表单 JSON、费用明细、附件元数据（默认不下载）、带内容哈希缓存的 LLM 风险评估、飞书深链，以及填写可选审批意见后二次确认通过或拒绝；任务支持手动和自然语言创建、修改、完成；日程支持普通日程、视频会议、参与人、地点和提醒。所有自然语言写操作都先生成结构化预览，再由用户确认执行。
 
 ## 桌面助手与工作台
+
+鼠标悬停桌面宠物会打开“工作一览”：待办、待审批和近期日程分别显示总数与前 2 条，超过 2 条时可独立展开或收起。展开复用同一份 60 秒缓存，不会因为查看更多内容再次请求飞书。
 
 双击桌面宠物，或从右键菜单选择“打开小绝助手”，可以打开 Electron 桌面助手。网页端的完整功能入口是 `http://localhost:7100/workbench`；直接在浏览器打开网页不会显示桌面助手的小型展开面板。
 
@@ -54,12 +56,21 @@
 - 在对话框中用自然语言创建、修改或完成任务，创建或修改日程，以及处理审批。大模型只生成受限的结构化计划，写操作仍需用户确认。
 - 在顶部“工作概览”直接查看和处理飞书数据：全部未完成待办、当前待审批和 Asia/Shanghai 当天的日程。
 
+<p align="center">
+  <img src="public/screenshots/assistant-natural-language.png" width="420" alt="小绝助手生成日程操作预览并等待确认" />
+</p>
+
+<p align="center"><sub>发送后输入框立即清空；自然语言写操作先生成结构化预览，再由用户确认。</sub></p>
+
+![飞书工作台日程与自然语言操作预览](public/screenshots/workbench-calendar.png)
+
 ### 任务与日程范围
 
 - 待办列表合并“分配给当前用户”和“由当前用户创建”的未完成飞书任务，不按截止日期过滤；未来、已过截止时间和未设置截止时间的任务都会显示。
 - 创建任务未指定执行人时，默认分配给当前用户。自然语言只有在明确提到“提醒”时才创建任务提醒，且提醒必须同时有截止时间。
 - 桌面助手点击任务左侧圆圈后会先显示内联确认，确认成功后任务从待办列表移除。网页工作台的任务卡目前点击完成按钮后直接提交。自然语言完成任务仍会先生成计划预览。
-- 桌面助手只展示今日日程。网页工作台默认查询今天到未来第 7 天，并允许调整起止日期；创建会议和查询空闲时间可能需要额外日历权限。
+- 悬停“工作一览”查询今天零点至未来 30 天，排除已结束、已取消、已拒绝和已移除的日程，默认展示最近 2 条；展开后显示当前缓存中的全部结果。
+- 双击打开的桌面助手只展示今日日程。网页工作台默认查询今天到未来第 7 天，并允许调整起止日期；创建会议和查询空闲时间可能需要额外日历权限。
 - 右键菜单里的“整理今日待办”是对近期飞书消息做 LLM 摘要，不等同于飞书任务列表，也不会自动创建飞书任务。
 
 ### 关闭与上下文
@@ -107,25 +118,37 @@ lark-cli config init --new   # 首次配置应用
 lark-cli update              # 同时更新 CLI 和配套 Skills
 ```
 
-更新后，如果正在通过 AI Agent 使用 lark-cli Skills，需要退出并重新打开 Agent。然后配置消息监工：
+更新后，如果正在通过 AI Agent 使用 lark-cli Skills，需要退出并重新打开 Agent。右键菜单的消息总结会按需启动一次性任务，不需要再单独启动 watcher；需先在飞书开放平台开通同名 scope，再完成用户授权：
 
 ```bash
-cp feishu/.env.local.example feishu/.env.local   # 改成你的群 chat_id 和 open_id
+lark-cli auth login --scope "im:chat:read im:message.history:readonly im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.reactions:read contact:user.base:readonly"
+```
+
+只有需要持续监控指定重点群的消息气泡和 18:00 日报时，才需要额外配置并启动长驻监工：
+
+```bash
+cp feishu/.env.local.example feishu/.env.local   # 可选：填入要重点监听的群 chat_id
 npm run pet:watch                                # 启动监工（PET_REPORT_DRYRUN=1 时总结只上看板不发飞书）
 ```
 
-两个必配项的获取方式：`lark-cli im +chat-list --as user` 找 `chat_id`，
-`lark-cli contact +me --as user` 找 `open_id`。
+`chat_id` 可通过 `lark-cli im +chat-list --as user` 查找。当前用户 `open_id` 默认从
+`lark-cli auth status --json` 自动读取，无需写入 `.env.local`。
 
 工作台操作的是用户自己的审批、任务和主日历，需要额外完成用户授权：
 
 ```bash
-lark-cli auth login --scope "approval:task:read approval:instance:read approval:task:write task:task:read task:task:write calendar:calendar.event:read calendar:calendar.event:create calendar:calendar.event:update calendar:calendar.free_busy:read"
+lark-cli auth login --scope "approval:task:read approval:instance:read approval:task:write task:task:read task:task:write calendar:calendar.event:read calendar:calendar.event:create calendar:calendar.event:update"
 ```
 
 应用还需要在飞书开放平台开通相同 scope。也就是说，工作台权限同时受“应用已开通权限”和“当前用户已授权”两层控制；多次 `auth login --scope` 会增量补充用户授权。工作台顶栏会检测用户 token 状态，授权过期或 scope 不足时显示并可复制最小权限命令。
 
-日历通过飞书的 `<primary>` 别名操作当前用户主日历，不需要申请 `calendar:calendar.calendar:readonly`。`calendar:calendar.free_busy:read` 用于查询空闲时间。如果授权返回 `These permissions are restricted by your organization's security policy`，说明权限被组织策略限制，重复登录或在个人授权页勾选权限无法解决，需要组织管理员调整策略；在策略放开前，对应的日历或空闲时间能力不可用，其他已获授权的功能不受影响。
+日程查询、创建和修改都直接使用飞书的 `primary` 主日历别名，不额外申请读取日历资料的权限。`calendar:calendar.free_busy:read` 只用于查询空闲时间，不影响指定时间创建日程或会议。如果授权返回 `These permissions are restricted by your organization's security policy`，说明该权限被组织策略限制，重复登录或在个人授权页勾选权限无法解决，需要组织管理员调整策略；在策略放开前，对应能力不可用，其他已获授权的功能不受影响。
+
+如需使用“查找空闲时间”建议，再单独增量授权：
+
+```bash
+lark-cli auth login --scope "calendar:calendar.free_busy:read"
+```
 
 审批通过或拒绝属于高风险写操作，必须在界面确认具体审批和动作后才会提交，审批意见可以留空。
 

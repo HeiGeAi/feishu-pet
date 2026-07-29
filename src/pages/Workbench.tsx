@@ -512,9 +512,26 @@ const inputClass =
 const buttonClass =
   'inline-flex min-h-9 items-center justify-center gap-1.5 rounded-md border-2 border-[#191919] px-3 py-1.5 text-xs font-black transition-all hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50'
 
+function actionLabel(action: string) {
+  const labels: Record<string, string> = {
+    'task.create': '创建任务',
+    'task.update': '修改任务',
+    'task.complete': '完成任务',
+    'calendar.create': '创建日程',
+    'calendar.update': '修改日程',
+    'calendar.suggest': '查找空闲时间',
+    clarify: '需要补充',
+  }
+  return labels[action] || action
+}
+
 function AuthBanner({ status }: { status: WorkspaceStatus | null }) {
   const [copied, setCopied] = useState(false)
-  if (!status || status.ready) return null
+  const missingOptionalScopes = status?.missingOptionalScopes || []
+  const optionalCapabilityNames = [
+    missingOptionalScopes.includes('calendar:calendar.free_busy:read') ? '查找空闲时间' : '',
+  ].filter(Boolean)
+  if (!status || (status.ready && !missingOptionalScopes.length)) return null
   const copy = async () => {
     if (!status.loginCommand) return
     await navigator.clipboard.writeText(status.loginCommand)
@@ -529,13 +546,17 @@ function AuthBanner({ status }: { status: WorkspaceStatus | null }) {
             {!status.cliInstalled
               ? '未找到 lark-cli'
               : status.userAvailable
-                ? '飞书权限不完整'
+                ? status.ready
+                  ? '飞书核心权限已就绪'
+                  : '飞书权限不完整'
                 : '飞书用户授权已失效'}
           </p>
           <p className="text-[11px] font-bold text-[#191919]/65">
             {status.cliInstalled
               ? status.userAvailable
-                ? `还缺 ${status.missingScopes?.length || 0} 项权限，增量授权后即可使用全部工作台能力。`
+                ? status.ready
+                  ? `核心能力可用；${optionalCapabilityNames.join('、') || `${missingOptionalScopes.length} 项扩展能力`}仍需可选权限。`
+                  : `还缺 ${status.missingScopes?.length || 0} 项核心权限，增量授权后即可使用基础工作台能力。`
                 : '审批、任务和个人日历必须使用用户身份，重新授权后即可读取真实数据。'
               : '请先安装并初始化飞书 CLI。'}
           </p>
@@ -543,7 +564,7 @@ function AuthBanner({ status }: { status: WorkspaceStatus | null }) {
         {status.loginCommand && (
           <button className={`${buttonClass} shrink-0 bg-white`} onClick={copy} title="复制授权命令">
             {copied ? <Check className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
-            {copied ? '已复制' : '复制最小权限授权命令'}
+            {copied ? '已复制' : status.ready ? '复制可选权限授权命令' : '复制最小权限授权命令'}
           </button>
         )}
       </div>
@@ -1228,6 +1249,7 @@ function CalendarTab({ items, loading, error, range, setRange, reload }: {
   reload: () => void
 }) {
   const [editing, setEditing] = useState<CalendarItem | null>(null)
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -1282,14 +1304,39 @@ function AssistantPanel({ tab, tasks, calendar, onExecuted }: {
     tasks: '明天下午 6 点前完成季度复盘，描述写整理结论和行动项',
     calendar: '周三上午十点创建产品评审会议，持续一小时，提前 15 分钟提醒',
   }
-  const [instruction, setInstruction] = useState('')
+  const [hasInstruction, setHasInstruction] = useState(false)
   const [plan, setPlan] = useState<AssistantPlan | null>(null)
   const [result, setResult] = useState<unknown>(null)
   const [resultAction, setResultAction] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)
+  const instructionInputRef = useRef<HTMLTextAreaElement>(null)
+  const planButtonRef = useRef<HTMLButtonElement>(null)
+  const instructionDraftRef = useRef('')
+  const hasInstructionRef = useRef(false)
+
+  const updateInstructionDraft = (value: string) => {
+    instructionDraftRef.current = value
+    const nextHasInstruction = Boolean(value.trim())
+    if (nextHasInstruction !== hasInstructionRef.current) {
+      hasInstructionRef.current = nextHasInstruction
+      setHasInstruction(nextHasInstruction)
+    }
+  }
+
+  const clearInstruction = () => {
+    instructionDraftRef.current = ''
+    if (instructionInputRef.current) instructionInputRef.current.value = ''
+    if (hasInstructionRef.current) {
+      hasInstructionRef.current = false
+      setHasInstruction(false)
+    }
+  }
 
   const planInstruction = async () => {
+    const text = instructionDraftRef.current.trim()
+    if (!text || busy || tab === 'approvals') return
+    clearInstruction()
     setBusy(true)
     setError(null)
     setPlan(null)
@@ -1312,7 +1359,7 @@ function AssistantPanel({ tab, tasks, calendar, onExecuted }: {
       const data = await api<{ ok: true; plan: AssistantPlan }>('/api/workspace/assistant/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instruction, context }),
+        body: JSON.stringify({ instruction: text, context }),
       })
       setPlan(data.plan)
     } catch (err) {
@@ -1336,7 +1383,6 @@ function AssistantPanel({ tab, tasks, calendar, onExecuted }: {
       setResult(data.data)
       setResultAction(action)
       setPlan(null)
-      setInstruction('')
       onExecuted()
     } catch (err) {
       setError(err as ApiError)
@@ -1347,6 +1393,10 @@ function AssistantPanel({ tab, tasks, calendar, onExecuted }: {
   const suggestedSlots = resultAction === 'calendar.suggest' && result !== null
     ? formatTimeSlots(result)
     : []
+  const cancelPlan = () => {
+    setPlan(null)
+    requestAnimationFrame(() => planButtonRef.current?.focus())
+  }
 
   return (
     <div className="sticker p-4">
@@ -1357,8 +1407,8 @@ function AssistantPanel({ tab, tasks, calendar, onExecuted }: {
           <p className="text-[10px] font-bold text-[#191919]/45">先生成结构化预览，再确认执行</p>
         </div>
       </div>
-      <textarea className={`${inputClass} mt-3 min-h-28 resize-y`} value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder={examples[tab]} disabled={tab === 'approvals'} />
-      <button className={`${buttonClass} mt-2 w-full bg-[#191919] text-white`} onClick={planInstruction} disabled={busy || tab === 'approvals' || !instruction.trim()}>
+      <textarea ref={instructionInputRef} className={`${inputClass} mt-3 min-h-28 resize-y`} onInput={(event) => updateInstructionDraft(event.currentTarget.value)} placeholder={examples[tab]} disabled={tab === 'approvals'} maxLength={3000} />
+      <button ref={planButtonRef} className={`${buttonClass} mt-2 w-full bg-[#191919] text-white`} onClick={planInstruction} disabled={busy || tab === 'approvals' || !hasInstruction}>
         {busy && !plan ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
         生成操作预览
       </button>
@@ -1366,7 +1416,7 @@ function AssistantPanel({ tab, tasks, calendar, onExecuted }: {
       {plan && (
         <div className="mt-3 rounded-md border-2 border-[#191919] bg-[#FFFBE8] p-3">
           <div className="flex items-center justify-between gap-2">
-            <span className="rounded border border-[#191919] bg-white px-1.5 py-0.5 text-[10px] font-black">{plan.action}</span>
+            <span className="rounded border border-[#191919] bg-white px-1.5 py-0.5 text-[10px] font-black">{actionLabel(plan.action)}</span>
             {plan.requiresConfirmation && <span className="text-[10px] font-black text-[#B42318]">待确认</span>}
           </div>
           <p className="mt-2 text-sm font-black leading-relaxed">{plan.preview}</p>
@@ -1379,10 +1429,13 @@ function AssistantPanel({ tab, tasks, calendar, onExecuted }: {
             ))}
           </dl>
           {plan.action !== 'clarify' && (
-            <button className={`${buttonClass} mt-3 w-full ${plan.requiresConfirmation ? 'bg-[#FF8FD8]' : 'bg-[#9BE83A]'}`} onClick={execute} disabled={busy}>
-              {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-              {plan.requiresConfirmation ? '确认并执行' : '查询候选时间'}
-            </button>
+            <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
+              <button className={`${buttonClass} w-full ${plan.requiresConfirmation ? 'bg-[#FF8FD8]' : 'bg-[#9BE83A]'}`} onClick={execute} disabled={busy}>
+                {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                {busy ? '执行中' : plan.requiresConfirmation ? '确认并执行' : '查询候选时间'}
+              </button>
+              <button className={`${buttonClass} bg-white`} onClick={cancelPlan} disabled={busy} title="取消操作" aria-label="取消操作"><X className="h-4 w-4" /></button>
+            </div>
           )}
         </div>
       )}

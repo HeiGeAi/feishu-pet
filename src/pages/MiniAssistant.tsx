@@ -245,8 +245,9 @@ export default function MiniAssistant() {
   }, [])
 
   useEffect(() => {
-    void loadOverview()
+    const timer = window.setTimeout(() => void loadOverview(), 0)
     return () => {
+      window.clearTimeout(timer)
       overviewRequestId.current += 1
     }
   }, [loadOverview])

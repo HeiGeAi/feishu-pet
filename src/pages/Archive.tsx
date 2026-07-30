@@ -170,7 +170,6 @@ export default function Archive() {
   }, [])
 
   useEffect(() => {
-    setLoading(true)
     const timer = setTimeout(() => load(type, q), q ? 300 : 0)
     return () => clearTimeout(timer)
   }, [type, q, load])
@@ -215,7 +214,10 @@ export default function Archive() {
           {TABS.map((t) => (
             <button
               key={t.id}
-              onClick={() => setType(t.id)}
+              onClick={() => {
+                setLoading(true)
+                setType(t.id)
+              }}
               className={`rounded-lg border-2 border-[#191919] px-3 py-1.5 text-xs font-black transition-all ${
                 type === t.id
                   ? 'bg-[#191919] text-[#9BE83A] shadow-[3px_3px_0_rgba(25,25,25,0.3)]'
@@ -227,7 +229,10 @@ export default function Archive() {
           ))}
           <input
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => {
+              setLoading(true)
+              setQ(e.target.value)
+            }}
             placeholder="搜内容 / 来源 / 触发方式…"
             className="ml-auto w-56 rounded-lg border-2 border-[#191919] bg-white px-3 py-1.5 text-xs font-bold outline-none focus:border-[#2B5CFF]"
           />

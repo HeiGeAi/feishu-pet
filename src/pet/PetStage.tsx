@@ -51,13 +51,15 @@ export function PetStage({ state, stateSince, interact, scale = 1.35, skin = 'pi
   const formRef = useRef(form)
   const imgCacheRef = useRef(new Map<string, HTMLImageElement>())
   const particlesRef = useRef<Particle[]>([])
-  const blinkRef = useRef({ next: performance.now() + 2500, until: 0 })
+  const blinkRef = useRef({ next: 0, until: 0 })
   const patUntilRef = useRef(0)
 
-  stateRef.current = state
-  stateSinceRef.current = stateSince
-  skinRef.current = skin
-  formRef.current = form
+  useEffect(() => {
+    stateRef.current = state
+    stateSinceRef.current = stateSince
+    skinRef.current = skin
+    formRef.current = form
+  }, [form, skin, state, stateSince])
 
   const getImage = (src: string): HTMLImageElement | null => {
     let img = imgCacheRef.current.get(src)
@@ -128,6 +130,7 @@ export function PetStage({ state, stateSince, interact, scale = 1.35, skin = 'pi
     const ctx = canvas.getContext('2d')
     if (!ctx) return
     ctx.imageSmoothingEnabled = false
+    blinkRef.current.next = performance.now() + 2500
 
     let raf = 0
     const loop = (t: number) => {

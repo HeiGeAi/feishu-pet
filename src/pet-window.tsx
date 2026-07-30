@@ -75,6 +75,7 @@ const HOVER_CLOSE_DELAY = 420
 const OVERVIEW_TTL = 60_000
 const UPCOMING_CALENDAR_DAYS = 30
 const OVERVIEW_PREVIEW_COUNT = 2
+const PET_WINDOW_STARTED_AT = Date.now()
 
 type OverviewKind = 'tasks' | 'approvals' | 'calendar'
 type OverviewData = {
@@ -316,7 +317,7 @@ function OverviewSection({
 export function PetWindow() {
   const { current, stateSince, interact, bumpInteract } = usePetChannel()
   const meta = STATE_META[current.state]
-  const [now, setNow] = useState(Date.now())
+  const [now, setNow] = useState(PET_WINDOW_STARTED_AT)
   const [scale, setScale] = useState(0.4)
   const [skin, setSkin] = useState<SkinId>(
     () => (localStorage.getItem('pet-skin') as SkinId) || 'pixel',
@@ -344,7 +345,10 @@ export function PetWindow() {
     calendar: false,
   })
   const scaleRef = useRef(scale)
-  scaleRef.current = scale
+
+  useEffect(() => {
+    scaleRef.current = scale
+  }, [scale])
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 2000)
@@ -501,11 +505,13 @@ export function PetWindow() {
     seenMsgTs.current = ev.ts
     // 重启补投的旧消息（5 分钟前）不计未读，免得一开机就挂着气泡
     if (Date.now() - ev.ts > 5 * 60_000) return
-    setUnread((u) => ({ n: u.n + 1, chatId: ev.chatId, label: ev.label ?? '' }))
+    const timer = window.setTimeout(() => {
+      setUnread((u) => ({ n: u.n + 1, chatId: ev.chatId, label: ev.label ?? '' }))
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [current])
 
-  const clearUnread = useRef(() => {})
-  clearUnread.current = () => setUnread({ n: 0, label: '' })
+  const clearUnread = useCallback(() => setUnread({ n: 0, label: '' }), [])
 
   // 气泡：未读消息常驻直到点掉；普通状态事件 30 秒内可见；小体型时同步缩小避免超出窗口
   const introActive = now < introUntil
@@ -524,7 +530,7 @@ export function PetWindow() {
   const onBubbleClick = () => {
     if (!bubbleClickable) return
     const chatId = bubbleChatId
-    clearUnread.current()
+    clearUnread()
     if (chatId) window.petAPI?.openChat(chatId)
   }
 

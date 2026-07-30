@@ -17,7 +17,7 @@ export function usePetChannel() {
   const [current, setCurrent] = useState<PetEvent>(FALLBACK)
   const [log, setLog] = useState<PetEvent[]>([])
   const [connected, setConnected] = useState(false)
-  const [stateSince, setStateSince] = useState(Date.now())
+  const [stateSince, setStateSince] = useState(FALLBACK.ts)
   const [interact, setInteract] = useState<{ kind: 'pat' | 'feed'; n: number }>({
     kind: 'pat',
     n: 0,

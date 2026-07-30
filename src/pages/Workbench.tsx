@@ -701,21 +701,26 @@ function ApprovalTab({ items, loading, error, reload }: {
       summaries: [],
       raw: {},
     } satisfies ApprovalItem : items[0])
-    if (initialItem) void open(initialItem)
+    if (!initialItem) return
+    const timer = window.setTimeout(() => void open(initialItem), 0)
+    return () => window.clearTimeout(timer)
   }, [items, open, selected])
 
   useEffect(() => {
-    setSelected((current) => {
-      if (!current) return current
-      const pendingItem = items.find((item) => item.instanceCode === current.instanceCode)
-      if (!pendingItem) return current
-      if (
-        current.taskId === pendingItem.taskId &&
-        current.canOperate === pendingItem.canOperate &&
-        current.summaries.length === pendingItem.summaries.length
-      ) return current
-      return { ...current, ...pendingItem }
-    })
+    const timer = window.setTimeout(() => {
+      setSelected((current) => {
+        if (!current) return current
+        const pendingItem = items.find((item) => item.instanceCode === current.instanceCode)
+        if (!pendingItem) return current
+        if (
+          current.taskId === pendingItem.taskId &&
+          current.canOperate === pendingItem.canOperate &&
+          current.summaries.length === pendingItem.summaries.length
+        ) return current
+        return { ...current, ...pendingItem }
+      })
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [items])
 
   const evaluate = () => {
@@ -986,21 +991,13 @@ function TaskForm({ editing, busy, onCancel, onSaved }: {
   onCancel: () => void
   onSaved: () => void
 }) {
-  const [summary, setSummary] = useState('')
-  const [description, setDescription] = useState('')
-  const [due, setDue] = useState('')
+  const [summary, setSummary] = useState(editing?.summary || '')
+  const [description, setDescription] = useState(editing?.description || '')
+  const [due, setDue] = useState(toDateTimeInput(editing?.due || null))
   const [assignee, setAssignee] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)
   const createIdempotencyKey = useRef(`pet-task-${crypto.randomUUID()}`)
-
-  useEffect(() => {
-    setSummary(editing?.summary || '')
-    setDescription(editing?.description || '')
-    setDue(toDateTimeInput(editing?.due || null))
-    setAssignee('')
-    setError(null)
-  }, [editing])
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -1103,7 +1100,7 @@ function TaskTab({ items, loading, error, reload }: {
           <RefreshCw className="h-4 w-4" />刷新
         </button>
       </div>
-      <TaskForm editing={editing} busy={loading} onCancel={() => setEditing(null)} onSaved={() => { setEditing(null); reload() }} />
+      <TaskForm key={editing?.guid || 'new'} editing={editing} busy={loading} onCancel={() => setEditing(null)} onSaved={() => { setEditing(null); reload() }} />
       <ErrorNotice error={error || localError} />
       {loading ? <LoadingBlock /> : items.length === 0 && !error ? <EmptyBlock text="当前没有未完成任务，可以先创建一条" /> : (
         <div className="grid gap-3 md:grid-cols-2">
@@ -1145,30 +1142,21 @@ function CalendarForm({ editing, onCancel, onSaved }: {
   onCancel: () => void
   onSaved: () => void
 }) {
-  const [summary, setSummary] = useState('')
-  const [start, setStart] = useState(defaultDateTime(60))
-  const [end, setEnd] = useState(defaultDateTime(90))
-  const [description, setDescription] = useState('')
-  const [location, setLocation] = useState('')
+  const [summary, setSummary] = useState(editing?.summary || '')
+  const [start, setStart] = useState(
+    () => toDateTimeInput(editing?.start || null) || defaultDateTime(60),
+  )
+  const [end, setEnd] = useState(
+    () => toDateTimeInput(editing?.end || null) || defaultDateTime(90),
+  )
+  const [description, setDescription] = useState(editing?.description || '')
+  const [location, setLocation] = useState(editing?.location || '')
   const [attendees, setAttendees] = useState('')
-  const [reminderMinutes, setReminderMinutes] = useState('5')
-  const [meeting, setMeeting] = useState(false)
+  const [reminderMinutes, setReminderMinutes] = useState(editing ? '' : '5')
+  const [meeting, setMeeting] = useState(editing?.meeting || false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)
   const createIdempotencyKey = useRef(`pet-calendar-${crypto.randomUUID()}`)
-
-  useEffect(() => {
-    setSummary(editing?.summary || '')
-    setStart(toDateTimeInput(editing?.start || null) || defaultDateTime(60))
-    setEnd(toDateTimeInput(editing?.end || null) || defaultDateTime(90))
-    setDescription(editing?.description || '')
-    setLocation(editing?.location || '')
-    setAttendees('')
-    // 编辑时飞书不回传原提醒设置，默认「保持不变」，避免悄悄把提醒改成 5 分钟
-    setReminderMinutes(editing ? '' : '5')
-    setMeeting(editing?.meeting || false)
-    setError(null)
-  }, [editing])
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -1263,7 +1251,7 @@ function CalendarTab({ items, loading, error, range, setRange, reload }: {
           <button className={`${buttonClass} bg-white`} onClick={reload} title="刷新日程"><RefreshCw className="h-4 w-4" /></button>
         </div>
       </div>
-      <CalendarForm editing={editing} onCancel={() => setEditing(null)} onSaved={() => { setEditing(null); reload() }} />
+      <CalendarForm key={editing?.eventId || 'new'} editing={editing} onCancel={() => setEditing(null)} onSaved={() => { setEditing(null); reload() }} />
       <ErrorNotice error={error} />
       {loading ? <LoadingBlock /> : items.length === 0 && !error ? <EmptyBlock text="所选时间范围内没有日程" /> : (
         <div className="space-y-2.5">

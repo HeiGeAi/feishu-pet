@@ -101,7 +101,7 @@ LLM 评估只是辅助建议，不会自动提交审批决定。若审批没有�
 
 ## 快速开始
 
-需要 Node.js ≥ 20 和 macOS。
+需要 Node.js ≥ 22.22.0 和 macOS。
 
 ```bash
 npm install

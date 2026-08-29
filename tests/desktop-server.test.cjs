@@ -89,6 +89,63 @@ test('SSE rejects an exact loopback Origin without the per-process capability', 
   assert.equal(response.headers['access-control-allow-origin'], undefined)
 })
 
+test('sensitive read APIs reject opaque origins even with the capability', async (t) => {
+  const server = await start()
+  t.after(() => close(server))
+
+  for (const pathname of ['/api/state', '/api/archive']) {
+    const response = await request(server, {
+      pathname: `${pathname}?cap=test-capability`,
+      headers: { Origin: 'null' },
+    })
+    assert.equal(response.status, 403, pathname)
+    assert.equal(response.headers['access-control-allow-origin'], undefined, pathname)
+  }
+})
+
+test('sensitive read APIs require and accept the loopback browser capability', async (t) => {
+  const server = await start()
+  t.after(() => close(server))
+  const origin = `http://127.0.0.1:${server.address().port}`
+
+  for (const pathname of ['/api/state', '/api/archive']) {
+    const rejected = await request(server, { pathname, headers: { Origin: origin } })
+    assert.equal(rejected.status, 403, pathname)
+
+    const accepted = await request(server, {
+      pathname: `${pathname}?cap=test-capability`,
+      headers: { Origin: origin },
+    })
+    assert.equal(accepted.status, 200, pathname)
+  }
+})
+
+test('all browser menu entries use the shared capability URL helper', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'desktop', 'main.cjs'), 'utf8')
+  const menu = source.slice(source.indexOf('function buildMenu()'), source.indexOf('function positionAssistantWindow'))
+
+  assert.match(menu, /label: '打开调试看板',[\s\S]*?localPageUrl\('\/'\)/)
+  assert.match(menu, /label: '飞书工作台',[\s\S]*?localPageUrl\('\/workbench'\)/)
+  assert.match(menu, /label: '📒 消息归档',[\s\S]*?localPageUrl\('\/archive'\)/)
+})
+
+test('Electron waits for the HTTP server before creating windows', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'desktop', 'main.cjs'), 'utf8')
+  const ready = source.slice(source.indexOf('app.whenReady()'), source.indexOf('// 单实例'))
+
+  assert.match(
+    ready,
+    /petServer\.once\('listening',[\s\S]*?createWindow\(\)[\s\S]*?createTray\(\)/,
+  )
+})
+
+test('archive browser requests send the local capability header', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'pages', 'Archive.tsx'), 'utf8')
+
+  assert.match(source, /addLocalCapability/)
+  assert.match(source, /fetch\([\s\S]*?headers:\s*addLocalCapability\(\)/)
+})
+
 test('shutdown flush preserves an archive item added inside the three-second interval', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-pet-archive-'))
   const archivePath = path.join(home, 'archive.json')
@@ -113,7 +170,10 @@ test('shutdown flush preserves an archive item added inside the three-second int
     await close(second)
     fs.rmSync(home, { recursive: true, force: true })
   })
-  const archived = await request(second, { pathname: '/api/archive' })
+  const archived = await request(second, {
+    pathname: '/api/archive?cap=test-capability',
+    headers: { Origin: `http://127.0.0.1:${second.address().port}` },
+  })
   const payload = JSON.parse(archived.body)
 
   assert.equal(payload.total, 1)

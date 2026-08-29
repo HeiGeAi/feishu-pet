@@ -27,6 +27,13 @@ const { startPetServer } = require('./server.cjs')
 const PORT = Number(process.env.PET_PORT || 7100)
 const PET_CAPABILITY = crypto.randomBytes(32).toString('hex')
 
+function localPageUrl(pathname, params = {}) {
+  const url = new URL(pathname, `http://127.0.0.1:${PORT}`)
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value))
+  url.searchParams.set('cap', PET_CAPABILITY)
+  return url.toString()
+}
+
 let win = null
 let assistantWin = null
 let tray = null
@@ -295,17 +302,15 @@ function buildMenu() {
     },
     {
       label: '打开调试看板',
-      click: () => shell.openExternal(`http://localhost:${PORT}/`),
+      click: () => shell.openExternal(localPageUrl('/')),
     },
     {
       label: '飞书工作台',
-      click: () => shell.openExternal(`http://localhost:${PORT}/workbench`),
+      click: () => shell.openExternal(localPageUrl('/workbench')),
     },
     {
       label: '📒 消息归档',
-      click: () => shell.openExternal(
-        `http://localhost:${PORT}/archive?cap=${encodeURIComponent(PET_CAPABILITY)}`,
-      ),
+      click: () => shell.openExternal(localPageUrl('/archive')),
     },
     {
       label: '退出小绝',
@@ -355,9 +360,7 @@ function createAssistantWindow() {
   assistantWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   assistantWin.setMenu(null)
   positionAssistantWindow()
-  assistantWin.loadURL(
-    `http://127.0.0.1:${PORT}/assistant?cap=${encodeURIComponent(PET_CAPABILITY)}`,
-  )
+  assistantWin.loadURL(localPageUrl('/assistant'))
   assistantWin.once('ready-to-show', () => assistantWin?.show())
   assistantWin.on('closed', () => {
     assistantWin = null
@@ -389,9 +392,7 @@ function createWindow() {
   const px = pos ? pos.x : workAreaSize.width - s.w - 40
   const py = pos ? pos.y : workAreaSize.height - s.h - 40
   win.setPosition(px, py)
-  win.loadURL(
-    `http://127.0.0.1:${PORT}/pet.html?cap=${encodeURIComponent(PET_CAPABILITY)}`,
-  )
+  win.loadURL(localPageUrl('/pet.html'))
   // 加载完成后同步当前体型（否则渲染端用默认缩放）
   win.webContents.on('did-finish-load', () => {
     win?.webContents.send('set-scale', SIZES[currentSize].scale)
@@ -507,9 +508,7 @@ ipcMain.on('assistant-resize', (_e, expanded) => {
   positionAssistantWindow()
 })
 ipcMain.on('open-workbench', () => {
-  shell.openExternal(
-    `http://127.0.0.1:${PORT}/workbench?cap=${encodeURIComponent(PET_CAPABILITY)}`,
-  )
+  shell.openExternal(localPageUrl('/workbench'))
 })
 const APPROVAL_ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/
 ipcMain.on('open-approval', (_e, approval) => {
@@ -528,9 +527,7 @@ ipcMain.on('open-approval', (_e, approval) => {
 })
 ipcMain.on('open-workbench-approval', (_e, instanceCode) => {
   if (typeof instanceCode !== 'string' || !APPROVAL_ID_PATTERN.test(instanceCode)) return
-  shell.openExternal(
-    `http://127.0.0.1:${PORT}/workbench?approval=${encodeURIComponent(instanceCode)}&cap=${encodeURIComponent(PET_CAPABILITY)}`,
-  )
+  shell.openExternal(localPageUrl('/workbench', { approval: instanceCode }))
 })
 
 // —— 像素级点击穿透：透明区域放行鼠标，只有点在宠物本体上才吃事件 ——
@@ -611,8 +608,10 @@ app.whenReady().then(() => {
       app.quit()
     },
   })
-  createWindow()
-  createTray()
+  petServer.once('listening', () => {
+    createWindow()
+    createTray()
+  })
 
   // 全局快捷键：⌘⌥P 切换鼠标穿透（穿透开了之后的逃生通道）
   globalShortcut.register('CommandOrControl+Alt+P', () => {

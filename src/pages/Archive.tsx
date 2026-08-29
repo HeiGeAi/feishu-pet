@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router'
+import { addLocalCapability } from '@/lib/local-capability'
 import { STATE_META, type PetState } from '@/types/pet'
 
 /**
@@ -156,6 +157,7 @@ export default function Archive() {
     try {
       const res = await fetch(
         `/api/archive?type=${encodeURIComponent(t)}&q=${encodeURIComponent(kw)}&limit=300`,
+        { headers: addLocalCapability() },
       )
       const d = await res.json()
       if (!d.ok) throw new Error(d.error || '加载失败')

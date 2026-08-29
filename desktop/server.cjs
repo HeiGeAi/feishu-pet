@@ -622,10 +622,11 @@ function startPetServer({
     }
 
     const isWorkspaceApi = url.startsWith('/api/workspace/')
+    const isSensitiveReadApi = url === '/api/state' || url === '/api/archive'
     // 汇报全文与干活指令只接受本机页面/本机进程写入；/api/event 与 /api/interact 保持开放（对外埋点协议）
     const isLlmSettingsApi = url === '/api/llm-config' || url === '/api/llm-test' ||
       url === '/api/report' || url === '/api/command'
-    if (isWorkspaceApi || isLlmSettingsApi) {
+    if (isWorkspaceApi || isLlmSettingsApi || isSensitiveReadApi) {
       let localOrigin = ''
       try {
         localOrigin = validateLocalApiRequest(req)

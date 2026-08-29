@@ -22,6 +22,7 @@ const {
 const { spawn } = require('node:child_process')
 const crypto = require('node:crypto')
 const path = require('path')
+const { createReadinessGate } = require('./readiness-gate.cjs')
 const { startPetServer } = require('./server.cjs')
 
 const PORT = Number(process.env.PET_PORT || 7100)
@@ -425,6 +426,10 @@ function createWindow() {
   })
 }
 
+const petWindowGate = createReadinessGate(() => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow()
+})
+
 function createTray() {
   const icon = nativeImage.createFromPath(path.join(__dirname, 'tray.png'))
   tray = new Tray(icon.resize({ width: 22 }))
@@ -609,7 +614,7 @@ app.whenReady().then(() => {
     },
   })
   petServer.once('listening', () => {
-    createWindow()
+    petWindowGate.markReady()
     createTray()
   })
 
@@ -619,7 +624,7 @@ app.whenReady().then(() => {
   })
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    petWindowGate.open()
   })
 })
 

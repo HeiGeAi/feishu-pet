@@ -135,8 +135,17 @@ test('Electron waits for the HTTP server before creating windows', () => {
 
   assert.match(
     ready,
-    /petServer\.once\('listening',[\s\S]*?createWindow\(\)[\s\S]*?createTray\(\)/,
+    /petServer\.once\('listening',[\s\S]*?petWindowGate\.markReady\(\)[\s\S]*?createTray\(\)/,
   )
+})
+
+test('Electron activate cannot create the HTTP window before server readiness', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'desktop', 'main.cjs'), 'utf8')
+  const ready = source.slice(source.indexOf('app.whenReady()'), source.indexOf('// 单实例'))
+
+  assert.match(source, /const petWindowGate = createReadinessGate/)
+  assert.match(ready, /app\.on\('activate',[\s\S]*?petWindowGate\.open\(\)/)
+  assert.doesNotMatch(ready, /app\.on\('activate',[\s\S]*?createWindow\(\)/)
 })
 
 test('archive browser requests send the local capability header', () => {

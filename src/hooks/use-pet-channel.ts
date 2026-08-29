@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PetEvent, PetReport, PetState } from '@/types/pet'
+import { withLocalCapability } from '@/lib/local-capability'
 
-/** 网页看板里走相对路径；桌面宠物窗口（file://）走绝对地址 */
+/** loopback 页面走相对路径，保留非 HTTP 调试页的绝对地址兜底。 */
 const API_BASE = window.location.protocol.startsWith('http')
   ? ''
   : `http://localhost:${location.port || 7100}`
@@ -35,7 +36,7 @@ export function usePetChannel() {
     let stopped = false
 
     const connect = () => {
-      es = new EventSource(`${API_BASE}/api/events`)
+      es = new EventSource(withLocalCapability(`${API_BASE}/api/events`))
       es.onopen = () => setConnected(true)
       es.onmessage = (m) => {
         try {

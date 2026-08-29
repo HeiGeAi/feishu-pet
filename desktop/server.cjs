@@ -430,9 +430,9 @@ async function handleWorkspaceRoute(req, res, url, json) {
   json(res, { ok: false, error: 'workspace route not found' }, 404)
 }
 
-function loadArchive() {
+function loadArchive(archivePath = ARCHIVE_PATH) {
   try {
-    const list = JSON.parse(fs.readFileSync(ARCHIVE_PATH, 'utf8'))
+    const list = JSON.parse(fs.readFileSync(archivePath, 'utf8'))
     if (Array.isArray(list)) return list.slice(-ARCHIVE_MAX)
   } catch {
     /* 首次没有 */
@@ -440,18 +440,42 @@ function loadArchive() {
   return []
 }
 
-function makeArchiveStore() {
-  const items = loadArchive()
-  let dirty = false
-  const timer = setInterval(() => {
-    if (!dirty) return
-    dirty = false
-    try {
-      fs.mkdirSync(path.dirname(ARCHIVE_PATH), { recursive: true })
-      fs.writeFileSync(ARCHIVE_PATH, JSON.stringify(items))
-    } catch {
-      /* 写不进就算了 */
+function makeArchiveStore({
+  archivePath = ARCHIVE_PATH,
+  writeFile = fs.promises.writeFile.bind(fs.promises),
+} = {}) {
+  const items = loadArchive(archivePath)
+  let revision = 0
+  let persistedRevision = 0
+  let pending = Promise.resolve()
+
+  const publish = async () => {
+    while (persistedRevision < revision) {
+      const targetRevision = revision
+      const snapshot = JSON.stringify(items)
+      const temporaryPath = `${archivePath}.${process.pid}.${crypto.randomUUID()}.tmp`
+      await fs.promises.mkdir(path.dirname(archivePath), { recursive: true })
+      try {
+        await writeFile(temporaryPath, snapshot, { encoding: 'utf8', mode: 0o600 })
+        await fs.promises.rename(temporaryPath, archivePath)
+        persistedRevision = targetRevision
+      } catch (error) {
+        await fs.promises.unlink(temporaryPath).catch(() => {})
+        throw error
+      }
     }
+  }
+
+  const flush = () => {
+    const attempt = pending.catch(() => {}).then(publish)
+    pending = attempt
+    return attempt
+  }
+
+  const timer = setInterval(() => {
+    flush().catch((error) => {
+      console.warn(`[archive] 归档写入失败，将在下次重试：${error?.message || error}`)
+    })
   }, 3000)
   timer.unref?.()
   return {
@@ -459,14 +483,27 @@ function makeArchiveStore() {
     add(entry) {
       items.push({ id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, ...entry })
       if (items.length > ARCHIVE_MAX) items.splice(0, items.length - ARCHIVE_MAX)
-      dirty = true
+      revision += 1
+    },
+    flush,
+    close() {
+      clearInterval(timer)
     },
   }
 }
 
-function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onError } = {}) {
+function startPetServer({
+  port = 7100,
+  host = '127.0.0.1',
+  distDir,
+  onEvent,
+  onError,
+  capability = crypto.randomBytes(32).toString('hex'),
+  archivePath = ARCHIVE_PATH,
+  archiveWriteFile,
+} = {}) {
   const clients = new Set()
-  const archive = makeArchiveStore()
+  const archive = makeArchiveStore({ archivePath, writeFile: archiveWriteFile })
   let last = {
     state: 'idle',
     label: '待机中 · 等飞书 bot 召唤',
@@ -533,14 +570,28 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
     `http://localhost:${port}`,
   ])
 
-  // 宠物窗口经 file:// 加载，Chromium 把它的 Origin 序列化成字符串 "null"
-  const isLocalPageOrigin = (origin) => !origin || origin === 'null' || trustedLocalOrigins.has(origin)
+  const hasCapability = (req) => {
+    const parsed = new URL(req.url || '/', 'http://localhost')
+    const supplied = String(
+      req.headers['x-feishu-pet-capability'] || parsed.searchParams.get('cap') || '',
+    )
+    const expected = Buffer.from(String(capability))
+    const candidate = Buffer.from(supplied)
+    return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected)
+  }
 
   const validateLocalApiRequest = (req) => {
     const origin = String(req.headers.origin || '')
-    if (origin && !trustedLocalOrigins.has(origin)) {
+    if (origin === 'null' || (origin && !trustedLocalOrigins.has(origin))) {
       throw new workspace.WorkspaceError('本地 API 拒绝了非本机页面请求', {
         code: 'UNTRUSTED_ORIGIN',
+        status: 403,
+      })
+    }
+    const isLocalProcessHook = !origin && req.headers['x-feishu-pet-request'] === '1'
+    if (!isLocalProcessHook && !hasCapability(req)) {
+      throw new workspace.WorkspaceError('本地 API 请求缺少本次进程能力', {
+        code: 'INVALID_LOCAL_CAPABILITY',
         status: 403,
       })
     }
@@ -591,7 +642,7 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
           ...(localOrigin ? { 'Access-Control-Allow-Origin': localOrigin } : {}),
           Vary: 'Origin',
           'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, X-Feishu-Pet-Request',
+          'Access-Control-Allow-Headers': 'Content-Type, X-Feishu-Pet-Request, X-Feishu-Pet-Capability',
         })
         res.end()
         return
@@ -619,7 +670,11 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
     if (url === '/api/events' && req.method === 'GET') {
       // SSE 流里有消息气泡、汇报全文和指令，不能对任意网页开放读取
       const origin = String(req.headers.origin || '')
-      if (!isLocalPageOrigin(origin)) {
+      if (
+        origin === 'null' ||
+        (origin && !trustedLocalOrigins.has(origin)) ||
+        !hasCapability(req)
+      ) {
         json(res, { ok: false, error: '事件流只对本机页面开放' }, 403)
         return
       }
@@ -882,6 +937,8 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
   server.listen(port, host, () => {
     console.log(`🐾 小绝事件服务器: http://localhost:${port}`)
   })
+  server.flushArchive = archive.flush
+  server.on('close', () => archive.close())
   return server
 }
 

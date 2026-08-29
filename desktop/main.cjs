@@ -20,10 +20,12 @@ const {
   globalShortcut,
 } = require('electron')
 const { spawn } = require('node:child_process')
+const crypto = require('node:crypto')
 const path = require('path')
 const { startPetServer } = require('./server.cjs')
 
 const PORT = Number(process.env.PET_PORT || 7100)
+const PET_CAPABILITY = crypto.randomBytes(32).toString('hex')
 
 let win = null
 let assistantWin = null
@@ -34,6 +36,9 @@ let dragOffset = null
 let petOverviewExpanded = false
 let petOverviewRestoreBounds = null
 let summaryJobChild = null
+let petServer = null
+let archiveFlushStarted = false
+let archiveFlushComplete = false
 
 // 体型档位：窗口尺寸 + 渲染缩放
 const SIZES = {
@@ -165,7 +170,9 @@ function resizePetOverview(expanded) {
 }
 
 async function loadPetOverviewPath(pathname) {
-  const response = await fetch(`http://127.0.0.1:${PORT}${pathname}`)
+  const response = await fetch(`http://127.0.0.1:${PORT}${pathname}`, {
+    headers: { 'X-Feishu-Pet-Capability': PET_CAPABILITY },
+  })
   const body = await response.json().catch(() => ({}))
   if (!response.ok || !body.ok) throw new Error(body.error || `HTTP ${response.status}`)
   return body.data
@@ -296,7 +303,9 @@ function buildMenu() {
     },
     {
       label: '📒 消息归档',
-      click: () => shell.openExternal(`http://localhost:${PORT}/archive`),
+      click: () => shell.openExternal(
+        `http://localhost:${PORT}/archive?cap=${encodeURIComponent(PET_CAPABILITY)}`,
+      ),
     },
     {
       label: '退出小绝',
@@ -346,7 +355,9 @@ function createAssistantWindow() {
   assistantWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   assistantWin.setMenu(null)
   positionAssistantWindow()
-  assistantWin.loadURL(`http://127.0.0.1:${PORT}/assistant`)
+  assistantWin.loadURL(
+    `http://127.0.0.1:${PORT}/assistant?cap=${encodeURIComponent(PET_CAPABILITY)}`,
+  )
   assistantWin.once('ready-to-show', () => assistantWin?.show())
   assistantWin.on('closed', () => {
     assistantWin = null
@@ -378,7 +389,9 @@ function createWindow() {
   const px = pos ? pos.x : workAreaSize.width - s.w - 40
   const py = pos ? pos.y : workAreaSize.height - s.h - 40
   win.setPosition(px, py)
-  win.loadFile(path.join(__dirname, '..', 'dist', 'pet.html'))
+  win.loadURL(
+    `http://127.0.0.1:${PORT}/pet.html?cap=${encodeURIComponent(PET_CAPABILITY)}`,
+  )
   // 加载完成后同步当前体型（否则渲染端用默认缩放）
   win.webContents.on('did-finish-load', () => {
     win?.webContents.send('set-scale', SIZES[currentSize].scale)
@@ -494,7 +507,9 @@ ipcMain.on('assistant-resize', (_e, expanded) => {
   positionAssistantWindow()
 })
 ipcMain.on('open-workbench', () => {
-  shell.openExternal(`http://127.0.0.1:${PORT}/workbench`)
+  shell.openExternal(
+    `http://127.0.0.1:${PORT}/workbench?cap=${encodeURIComponent(PET_CAPABILITY)}`,
+  )
 })
 const APPROVAL_ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/
 ipcMain.on('open-approval', (_e, approval) => {
@@ -513,7 +528,9 @@ ipcMain.on('open-approval', (_e, approval) => {
 })
 ipcMain.on('open-workbench-approval', (_e, instanceCode) => {
   if (typeof instanceCode !== 'string' || !APPROVAL_ID_PATTERN.test(instanceCode)) return
-  shell.openExternal(`http://127.0.0.1:${PORT}/workbench?approval=${encodeURIComponent(instanceCode)}`)
+  shell.openExternal(
+    `http://127.0.0.1:${PORT}/workbench?approval=${encodeURIComponent(instanceCode)}&cap=${encodeURIComponent(PET_CAPABILITY)}`,
+  )
 })
 
 // —— 像素级点击穿透：透明区域放行鼠标，只有点在宠物本体上才吃事件 ——
@@ -585,9 +602,10 @@ setInterval(pollHitTest, 60)
 
 app.whenReady().then(() => {
   app.dock?.hide() // 桌面宠物：不占 Dock
-  startPetServer({
+  petServer = startPetServer({
     port: PORT,
     distDir: path.join(__dirname, '..', 'dist'),
+    capability: PET_CAPABILITY,
     onError: (_err, message) => {
       dialog.showErrorBox('小绝启动失败', message)
       app.quit()
@@ -616,6 +634,21 @@ if (!gotLock) {
 
 app.on('window-all-closed', () => {
   // 宠物常驻：窗口全关也不退出，靠托盘菜单退出
+})
+
+app.on('before-quit', (event) => {
+  if (archiveFlushComplete) return
+  event.preventDefault()
+  if (archiveFlushStarted) return
+  archiveFlushStarted = true
+  Promise.resolve(petServer?.flushArchive())
+    .catch((error) => {
+      console.warn(`[archive] 退出前归档写入失败：${error?.message || error}`)
+    })
+    .finally(() => {
+      archiveFlushComplete = true
+      app.quit()
+    })
 })
 
 app.on('will-quit', () => {

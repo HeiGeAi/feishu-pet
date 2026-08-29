@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { addLocalCapability } from '@/lib/local-capability'
 
 /**
  * 大模型设置：配置小绝汇报/总结用的 LLM 后端。
@@ -30,7 +31,7 @@ export function LlmSettings() {
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
-    fetch('/api/llm-config')
+    fetch('/api/llm-config', { headers: addLocalCapability() })
       .then((r) => r.json())
       .then((d) => {
         if (!d.ok) throw new Error(d.error)
@@ -49,10 +50,10 @@ export function LlmSettings() {
     try {
       const res = await fetch('/api/llm-config', {
         method: 'POST',
-        headers: {
+        headers: addLocalCapability({
           'Content-Type': 'application/json',
           'X-Feishu-Pet-Request': '1',
-        },
+        }),
         body: JSON.stringify({ provider, baseUrl, model, apiKey }),
       })
       const d = await res.json()
@@ -73,10 +74,10 @@ export function LlmSettings() {
     try {
       const res = await fetch('/api/llm-test', {
         method: 'POST',
-        headers: {
+        headers: addLocalCapability({
           'Content-Type': 'application/json',
           'X-Feishu-Pet-Request': '1',
-        },
+        }),
         body: '{}',
       })
       const d = await res.json()

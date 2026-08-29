@@ -1,3 +1,5 @@
+import { addLocalCapability } from '@/lib/local-capability'
+
 export type JsonObject = Record<string, unknown>
 
 export interface WorkspaceStatus {
@@ -68,7 +70,7 @@ export class ApiError extends Error {
 }
 
 export async function workspaceApi<T>(url: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers)
+  const headers = addLocalCapability(init?.headers)
   if (['POST', 'PATCH'].includes((init?.method || 'GET').toUpperCase())) {
     headers.set('X-Feishu-Pet-Request', '1')
   }

@@ -41,9 +41,24 @@ function ensurePrivateFileMode(filePath) {
   }
 }
 
+// 用户用编辑器另存过 llm.json 时权限位可能被放宽，读取时校验并告警（随后自动收紧）
+function warnIfLooseFileMode(filePath) {
+  try {
+    const mode = fs.statSync(filePath).mode & 0o777
+    if (mode & 0o077) {
+      console.warn(
+        `[llm-client] ${filePath} 权限过宽（${mode.toString(8)}），该文件含 API key，应为 600，已自动收紧`,
+      )
+    }
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err
+  }
+}
+
 function loadLlmConfig() {
   const base = defaultConfig()
   try {
+    warnIfLooseFileMode(CONFIG_PATH)
     ensurePrivateFileMode(CONFIG_PATH)
     const saved = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
     const merged = { ...base, ...saved }

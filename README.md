@@ -101,7 +101,7 @@ LLM 评估只是辅助建议，不会自动提交审批决定。若审批没有�
 
 ## 快速开始
 
-需要 Node.js ≥ 22.22.0 和 macOS。
+需要 Node.js ≥ 22.22.0 和 macOS。版本下限刻意定在 22.22.0：与 Electron 43 内嵌的 Node 22 主线对齐，避免开发态（系统 Node）与运行态（Electron 内嵌 Node）行为分叉；老版本 Node 请先用 nvm 等工具升级。
 
 ```bash
 npm install

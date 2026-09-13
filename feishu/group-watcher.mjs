@@ -250,7 +250,7 @@ function classify(m) {
   else if (type !== 'text') text = text || `[${type}]`
   if ((ev === 'chat' || ev === 'mention_all') && CELEBRATE_WORDS.some((k) => text.includes(k)))
     ev = 'celebrate'
-  return { ev, name, text: cleanText(text), time: (m.create_time || '').slice(-5) }
+  return { ev, name, text: cleanText(text), time: formatMessageTime(m.create_time) }
 }
 
 const STATE_MAP = {

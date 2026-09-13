@@ -647,7 +647,8 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
       const query = new URL(req.url, 'http://x').searchParams
       const type = query.get('type') || 'all'
       const q = (query.get('q') || '').trim().toLowerCase()
-      const limit = Math.min(Number(query.get('limit') || 200), ARCHIVE_MAX)
+      const rawLimit = Number(query.get('limit'))
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, ARCHIVE_MAX) : 200
       let items = archive.items
       if (type !== 'all') items = items.filter((it) => it.kind === type)
       if (q) {

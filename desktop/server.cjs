@@ -686,11 +686,8 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
     }
 
     if (url === '/api/event' && req.method === 'POST') {
-      let body = ''
-      req.on('data', (c) => (body += c))
-      req.on('end', () => {
-        try {
-          const parsed = JSON.parse(body || '{}')
+      readJsonBody(req)
+        .then((parsed) => {
           if (!VALID_STATES.has(parsed.state)) {
             json(res, {
               ok: false,
@@ -708,19 +705,16 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
           if (parsed.chatId) ev.chatId = String(parsed.chatId).slice(0, 40)
           pushEvent(ev)
           json(res, { ok: true, event: ev })
-        } catch {
-          json(res, { ok: false, error: 'invalid JSON' })
-        }
-      })
+        })
+        .catch((err) => {
+          json(res, { ok: false, error: String(err?.message || 'invalid JSON'), code: err?.code || 'INVALID_JSON' }, Number(err?.status) || 400)
+        })
       return
     }
 
     if (url === '/api/interact' && req.method === 'POST') {
-      let body = ''
-      req.on('data', (c) => (body += c))
-      req.on('end', () => {
-        try {
-          const parsed = JSON.parse(body || '{}')
+      readJsonBody(req)
+        .then((parsed) => {
           const kind = parsed.kind === 'feed' ? 'feed' : 'pat'
           const interact = {
             kind,
@@ -730,20 +724,17 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
           }
           broadcast({ type: 'interact', interact })
           json(res, { ok: true, interact })
-        } catch {
-          json(res, { ok: false, error: 'invalid JSON' })
-        }
-      })
+        })
+        .catch((err) => {
+          json(res, { ok: false, error: String(err?.message || 'invalid JSON'), code: err?.code || 'INVALID_JSON' }, Number(err?.status) || 400)
+        })
       return
     }
 
     // 群汇报卡片：watcher 的 LLM 总结全文
     if (url === '/api/report' && req.method === 'POST') {
-      let body = ''
-      req.on('data', (c) => (body += c))
-      req.on('end', () => {
-        try {
-          const parsed = JSON.parse(body || '{}')
+      readJsonBody(req)
+        .then((parsed) => {
           const report = {
             text: String(parsed.text ?? '').slice(0, 1200),
             trigger: String(parsed.trigger ?? '').slice(0, 40),
@@ -760,20 +751,17 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
           })
           broadcast({ type: 'report', report })
           json(res, { ok: true, report })
-        } catch {
-          json(res, { ok: false, error: 'invalid JSON' })
-        }
-      })
+        })
+        .catch((err) => {
+          json(res, { ok: false, error: String(err?.message || 'invalid JSON'), code: err?.code || 'INVALID_JSON' }, Number(err?.status) || 400)
+        })
       return
     }
 
     // 小绝的绝活：菜单下发干活指令（watcher 监听执行）
     if (url === '/api/command' && req.method === 'POST') {
-      let body = ''
-      req.on('data', (c) => (body += c))
-      req.on('end', () => {
-        try {
-          const parsed = JSON.parse(body || '{}')
+      readJsonBody(req)
+        .then((parsed) => {
           const cmd = {
             command: String(parsed.command ?? '').slice(0, 30),
             label: String(parsed.label ?? '').slice(0, 40),
@@ -792,10 +780,10 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
             broadcast({ type: 'command', command: cmd })
           }
           json(res, { ok: true, command: cmd })
-        } catch {
-          json(res, { ok: false, error: 'invalid JSON' })
-        }
-      })
+        })
+        .catch((err) => {
+          json(res, { ok: false, error: String(err?.message || 'invalid JSON'), code: err?.code || 'INVALID_JSON' }, Number(err?.status) || 400)
+        })
       return
     }
 
@@ -818,11 +806,8 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
 
     // —— 大模型设置：保存 ——
     if (url === '/api/llm-config' && req.method === 'POST') {
-      let body = ''
-      req.on('data', (c) => (body += c))
-      req.on('end', () => {
-        try {
-          const parsed = JSON.parse(body || '{}')
+      readJsonBody(req)
+        .then((parsed) => {
           const next = saveLlmConfig({
             provider: parsed.provider,
             baseUrl: String(parsed.baseUrl ?? '').trim(),
@@ -839,10 +824,10 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
               apiKeyMasked: maskKey(next.apiKey),
             },
           })
-        } catch (err) {
-          json(res, { ok: false, error: String(err.message || err) })
-        }
-      })
+        })
+        .catch((err) => {
+          json(res, { ok: false, error: String(err?.message || err), code: err?.code || 'INVALID_JSON' }, Number(err?.status) || 400)
+        })
       return
     }
 

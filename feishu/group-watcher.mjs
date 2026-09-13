@@ -175,7 +175,15 @@ const REPORT_CMDS = ['宠物总结', '总结一下', '宠物汇报', '汇报一�
 const PAT_CMDS = ['摸摸', '摸头', 'rua']
 const FEED_CMDS = ['投喂', '食物', '小鱼干', '喂食']
 
+const SEEN_MAX = 5000
 const seen = new Set()
+const seenQueue = [] // FIFO 队列：seen 超过 SEEN_MAX 时淘汰最老的 message_id，防长驻内存膨胀
+function markSeen(id) {
+  if (seen.has(id)) return
+  seen.add(id)
+  seenQueue.push(id)
+  if (seenQueue.length > SEEN_MAX) seen.delete(seenQueue.shift())
+}
 const buffer = [] // {name,text,time}
 let lastReportIdx = 0
 let summarizing = false
@@ -360,7 +368,7 @@ async function fetchMessages() {
 async function pollOnce(first) {
   const msgs = await fetchMessages() // 最新在前
   const fresh = msgs.filter((m) => !seen.has(m.message_id) && !m.deleted)
-  for (const m of msgs) seen.add(m.message_id)
+  for (const m of msgs) markSeen(m.message_id)
   const events = fresh.reverse().map(classify) // 旧→新
   for (const e of events) buffer.push({ name: e.name, text: e.text, time: e.time })
   if (buffer.length > 300) {

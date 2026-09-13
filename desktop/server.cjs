@@ -662,12 +662,22 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
       return
     }
 
-    if (
-      (url === '/api/event' || url === '/api/interact') &&
-      req.method === 'OPTIONS'
-    ) {
+    // /api/event 与 /api/interact 是对外埋点协议（本机 curl / pet-hook 不带 Origin，放行），
+    // 但带非本机 Origin 的浏览器请求一律 403，挡住任意网页伪造宠物状态与气泡跳转（本地 CSRF）。
+    const isOpenPetApi = url === '/api/event' || url === '/api/interact'
+    if (isOpenPetApi && ['POST', 'OPTIONS'].includes(req.method || '')) {
+      const origin = String(req.headers.origin || '')
+      if (!isLocalPageOrigin(origin)) {
+        json(res, { ok: false, error: '该接口只接受本机请求', code: 'UNTRUSTED_ORIGIN' }, 403)
+        return
+      }
+    }
+
+    if (isOpenPetApi && req.method === 'OPTIONS') {
+      const origin = String(req.headers.origin || '')
       res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
+        // CORS 从 * 收紧到本机 origin 白名单：只回显已通过校验的 Origin
+        ...(origin ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : {}),
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type',
       })

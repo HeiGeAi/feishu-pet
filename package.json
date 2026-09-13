@@ -1,6 +1,6 @@
 {
   "name": "feishu-pet",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "小绝 · 飞书干活宠物：悬浮桌面的干活搭子，飞书 bot 干活时实时换动作，支持消息气泡跳转、LLM 群汇报与多皮肤换装",
   "author": "黑哥 (heigeai)",
   "license": "MIT",

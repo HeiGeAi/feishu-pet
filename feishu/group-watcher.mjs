@@ -184,6 +184,26 @@ function markSeen(id) {
   seenQueue.push(id)
   if (seenQueue.length > SEEN_MAX) seen.delete(seenQueue.shift())
 }
+
+// 「今天」「当前小时」「当天日期 key」统一按 Asia/Shanghai 计算，
+// 与 llm-client 的 shanghaiNow 一致，机器不在东八区时日报也不会错点/漏发。
+const SHANGHAI_TZ = 'Asia/Shanghai'
+function shanghaiParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: SHANGHAI_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date)
+  const v = Object.fromEntries(parts.map((p) => [p.type, p.value]))
+  return { dayKey: [v.year, v.month, v.day].join('-'), hour: Number(v.hour) }
+}
+function shanghaiTodayStartMs(now = Date.now()) {
+  const day = shanghaiParts(new Date(now)).dayKey
+  return Date.parse(day + 'T00:00:00+08:00')
+}
 const buffer = [] // {name,text,time}
 let lastReportIdx = 0
 let summarizing = false
@@ -638,9 +658,7 @@ async function handleCommand(cmd, { runJob = runSummaryJob, postResult = post } 
   cmdBusy = true
   try {
     if (cmd.command === 'todo') {
-      const todayStart = new Date()
-      todayStart.setHours(0, 0, 0, 0)
-      const hours = Math.round(Math.max(1, (Date.now() - todayStart.getTime()) / 3600_000) * 10) / 10
+      const hours = Math.round(Math.max(1, (Date.now() - shanghaiTodayStartMs()) / 3600_000) * 10) / 10
       await runJob(hours, 'todo', cmd.label)
     } else if (cmd.command?.startsWith('summary:')) {
       const h = [6, 12, 24].includes(Number(cmd.command.split(':')[1]))
@@ -764,9 +782,8 @@ async function main(argv = process.argv.slice(2)) {
       }
     }
     // 每日 18:00 自动日报
-    const now = new Date()
-    const day = now.toISOString().slice(0, 10)
-    if (now.getHours() === DAILY_HOUR && !sentDays.has(day)) {
+    const { dayKey: day, hour } = shanghaiParts()
+    if (hour === DAILY_HOUR && !sentDays.has(day)) {
       sentDays.add(day)
       summarize('每日自动日报')
     }

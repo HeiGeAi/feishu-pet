@@ -448,7 +448,10 @@ function makeArchiveStore() {
     dirty = false
     try {
       fs.mkdirSync(path.dirname(ARCHIVE_PATH), { recursive: true })
-      fs.writeFileSync(ARCHIVE_PATH, JSON.stringify(items))
+      // 原子写：先写临时文件再 rename，避免写一半进程被杀留下坏 JSON
+      const tmp = `${ARCHIVE_PATH}.tmp`
+      fs.writeFileSync(tmp, JSON.stringify(items))
+      fs.renameSync(tmp, ARCHIVE_PATH)
     } catch {
       /* 写不进就算了 */
     }

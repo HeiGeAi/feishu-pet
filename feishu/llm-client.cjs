@@ -328,7 +328,10 @@ function saveApprovalCache(cache) {
     .slice(0, APPROVAL_CACHE_MAX)
   cache.entries = Object.fromEntries(entries)
   fs.mkdirSync(path.dirname(APPROVAL_CACHE_PATH), { recursive: true })
-  fs.writeFileSync(APPROVAL_CACHE_PATH, JSON.stringify(cache, null, 2), { mode: 0o600 })
+  // 原子写：先写临时文件再 rename，避免写一半进程被杀留下坏 JSON
+  const tmp = `${APPROVAL_CACHE_PATH}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(cache, null, 2), { mode: 0o600 })
+  fs.renameSync(tmp, APPROVAL_CACHE_PATH)
 }
 
 async function evaluateApprovalCached(instanceCode, approval, { force = false } = {}) {

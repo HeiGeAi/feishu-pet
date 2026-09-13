@@ -375,8 +375,15 @@ function createWindow() {
   // 初始位置：上次拖动的位置；没有则屏幕右下角
   const { workAreaSize } = screen.getPrimaryDisplay()
   const pos = loadPosition()
-  const px = pos ? pos.x : workAreaSize.width - s.w - 40
-  const py = pos ? pos.y : workAreaSize.height - s.h - 40
+  // 外接屏拔掉或排列变化后，上次位置可能落在所有显示器工作区之外（找不回窗口），
+  // 用与 drag-move 相同的可见余量校验，不在任何工作区内则回退右下角默认位。
+  const onScreen = pos && screen.getAllDisplays().some((d) => {
+    const a = d.workArea
+    return pos.x >= a.x - s.w + 60 && pos.x <= a.x + a.width - 60
+      && pos.y >= a.y && pos.y <= a.y + a.height - 40
+  })
+  const px = onScreen ? pos.x : workAreaSize.width - s.w - 40
+  const py = onScreen ? pos.y : workAreaSize.height - s.h - 40
   win.setPosition(px, py)
   win.loadFile(path.join(__dirname, '..', 'dist', 'pet.html'))
   // 加载完成后同步当前体型（否则渲染端用默认缩放）

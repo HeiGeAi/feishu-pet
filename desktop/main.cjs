@@ -340,8 +340,15 @@ function createAssistantWindow() {
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
+      // 显式声明安全基线，不依赖 Electron 默认值
+      contextIsolation: true,
+      nodeIntegration: false,
+      // preload 里用了 require，sandbox 必须保持 false，写明意图
+      sandbox: false,
     },
   })
+  // 桌宠只加载本地构建产物，拒绝任何意外开窗
+  assistantWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   assistantWin.setAlwaysOnTop(true, 'floating')
   assistantWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   assistantWin.setMenu(null)
@@ -367,8 +374,15 @@ function createWindow() {
     hasShadow: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
+      // 显式声明安全基线，不依赖 Electron 默认值
+      contextIsolation: true,
+      nodeIntegration: false,
+      // preload 里用了 require，sandbox 必须保持 false，写明意图
+      sandbox: false,
     },
   })
+  // 桌宠只加载本地构建产物，拒绝任何意外开窗
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.setAlwaysOnTop(true, 'screen-saver')
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   win.setMenu(null)

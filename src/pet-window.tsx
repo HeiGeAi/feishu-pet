@@ -58,6 +58,7 @@ declare global {
       }) => void
       openWorkbenchApproval: (instanceCode: string) => void
       resizePetOverview: (expanded: boolean) => void
+      channelAccess: () => Promise<{ base: string; token: string }>
       loadPetOverview: (range: { start: string; end: string }) => Promise<{
         tasks: { ok: boolean; data?: unknown; error?: string }
         approvals: { ok: boolean; data?: unknown; error?: string }

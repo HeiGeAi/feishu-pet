@@ -18,7 +18,7 @@ const post = (url, body, headers = {}) =>
   }).then(async (r) => ({ status: r.status, headers: r.headers, json: await r.json() }))
 
 test.before(async () => {
-  server = startPetServer({ port: TEST_PORT, host: '127.0.0.1', distDir: '/nonexistent' })
+  server = startPetServer({ desktopToken: 'a'.repeat(64), port: TEST_PORT, host: '127.0.0.1', distDir: '/nonexistent' })
   await new Promise((resolve) => server.on('listening', resolve))
 })
 
@@ -88,4 +88,34 @@ test('workspace-style routes still require the local client header', async () =>
   })
   assert.equal(withHeader.status, 200)
   assert.equal(withHeader.json.ok, true)
+})
+
+test('opaque origin cannot read events or mutate pet state', async () => {
+  for (const token of ['', '?desktopToken=wrong']) {
+    const stream = await fetch(base + '/api/events' + token, { headers: { origin: 'null', connection: 'close' } })
+    assert.equal(stream.status, 403)
+    assert.equal(stream.headers.get('access-control-allow-origin'), null)
+    for (const route of ['/api/event', '/api/interact']) {
+      const response = await post(route + token, JSON.stringify({ state: 'working', kind: 'pat' }), { origin: 'null', 'content-type': 'text/plain' })
+      assert.equal(response.status, 403)
+    }
+  }
+})
+
+test('Electron capability authenticates initial connection and reconnect; local web remains supported', async () => {
+  for (const origin of ['null', `http://127.0.0.1:${TEST_PORT}`]) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const controller = new AbortController()
+      const response = await fetch(base + '/api/events?desktopToken=' + 'a'.repeat(64), { headers: { origin }, signal: controller.signal })
+      assert.equal(response.status, 200)
+      const chunk = await response.body.getReader().read()
+      assert.match(new TextDecoder().decode(chunk.value), /"type":"init"/)
+      controller.abort()
+    }
+  }
+  const response = await post('/api/event?desktopToken=' + 'a'.repeat(64), JSON.stringify({ state: 'idle' }), { origin: 'null' })
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('access-control-allow-origin'), 'null')
+  const foreign = await fetch(base + '/api/events?desktopToken=' + 'a'.repeat(64), { headers: { origin: 'https://evil.example', connection: 'close' } })
+  assert.equal(foreign.status, 403)
 })

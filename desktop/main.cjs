@@ -23,6 +23,8 @@ const { spawn } = require('node:child_process')
 const path = require('path')
 const { startPetServer } = require('./server.cjs')
 
+const desktopToken = require('node:crypto').randomBytes(32).toString('hex')
+const { pathToFileURL } = require('node:url')
 const PORT = Number(process.env.PET_PORT || 7100)
 
 let win = null
@@ -492,6 +494,13 @@ ipcMain.on('skin-changed', (_e, v) => {
 })
 ipcMain.on('open-assistant', () => createAssistantWindow())
 ipcMain.on('pet-overview-resize', (_e, expanded) => resizePetOverview(Boolean(expanded)))
+ipcMain.handle('pet-channel-access', require('./channel-access.cjs').createChannelAccess({
+  getWindow: () => win,
+  expectedUrl: pathToFileURL(path.join(__dirname, '..', 'dist', 'pet.html')).href,
+  base: `http://127.0.0.1:${PORT}`,
+  token: desktopToken,
+}))
+
 ipcMain.handle('pet-overview-load', async (_e, range) => {
   const start = typeof range?.start === 'string' ? range.start.slice(0, 80) : ''
   const end = typeof range?.end === 'string' ? range.end.slice(0, 80) : ''
@@ -608,6 +617,7 @@ app.whenReady().then(() => {
   app.dock?.hide() // 桌面宠物：不占 Dock
   startPetServer({
     port: PORT,
+    desktopToken,
     distDir: path.join(__dirname, '..', 'dist'),
     onError: (_err, message) => {
       dialog.showErrorBox('小绝启动失败', message)

@@ -6,6 +6,15 @@ const API_BASE = window.location.protocol.startsWith('http')
   ? ''
   : `http://localhost:${location.port || 7100}`
 
+async function channelUrl(path: string) {
+  if (window.location.protocol === 'file:') {
+    if (!window.petAPI?.channelAccess) throw new Error('Pet IPC unavailable')
+    const access = await window.petAPI.channelAccess()
+    return `${access.base}${path}?desktopToken=${encodeURIComponent(access.token)}`
+  }
+  return `${API_BASE}${path}`
+}
+
 const FALLBACK: PetEvent = {
   state: 'idle',
   label: '待机中 · 等飞书 bot 召唤',
@@ -34,8 +43,16 @@ export function usePetChannel() {
     let retry: ReturnType<typeof setTimeout>
     let stopped = false
 
-    const connect = () => {
-      es = new EventSource(`${API_BASE}/api/events`)
+    const connect = async () => {
+      let url: string
+      try {
+        url = await channelUrl('/api/events')
+      } catch {
+        if (!stopped) retry = setTimeout(connect, 3000)
+        return
+      }
+      if (stopped) return
+      es = new EventSource(url)
       es.onopen = () => setConnected(true)
       es.onmessage = (m) => {
         try {
@@ -78,7 +95,7 @@ export function usePetChannel() {
 
   const sendEvent = useCallback(async (state: PetState, label?: string) => {
     try {
-      const res = await fetch(`${API_BASE}/api/event`, {
+      const res = await fetch(await channelUrl('/api/event'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ state, label, source: 'demo' }),

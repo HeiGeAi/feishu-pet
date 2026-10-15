@@ -1,5 +1,13 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+
+// Import the store only after isolating its home path from the developer's archive.
+const originalHomedir = os.homedir
+const testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-pet-server-'))
+os.homedir = () => testHome
 
 const { startPetServer } = require('../desktop/server.cjs')
 
@@ -22,8 +30,10 @@ test.before(async () => {
   await new Promise((resolve) => server.on('listening', resolve))
 })
 
-test.after(() => {
-  server?.close()
+test.after(async () => {
+  await new Promise((resolve) => server.close(resolve))
+  os.homedir = originalHomedir
+  fs.rmSync(testHome, { recursive: true, force: true })
 })
 
 test('browser page with foreign origin cannot forge pet events (local CSRF guard)', async () => {
@@ -91,10 +101,14 @@ test('workspace-style routes still require the local client header', async () =>
 })
 
 test('opaque origin cannot read events or mutate pet state', async () => {
+  const secret = 'SYNTHETIC_PRIVATE_REPORT'
+  const report = await post('/api/report', JSON.stringify({ text: secret, trigger: 'manual' }), { 'x-feishu-pet-request': '1' })
+  assert.equal(report.status, 200)
   for (const token of ['', '?desktopToken=wrong']) {
     const stream = await fetch(base + '/api/events' + token, { headers: { origin: 'null', connection: 'close' } })
     assert.equal(stream.status, 403)
     assert.equal(stream.headers.get('access-control-allow-origin'), null)
+    assert.equal((await stream.text()).includes(secret), false)
     for (const route of ['/api/event', '/api/interact']) {
       const response = await post(route + token, JSON.stringify({ state: 'working', kind: 'pat' }), { origin: 'null', 'content-type': 'text/plain' })
       assert.equal(response.status, 403)

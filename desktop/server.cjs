@@ -467,7 +467,7 @@ function makeArchiveStore() {
   }
 }
 
-function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onError } = {}) {
+function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onError, desktopToken } = {}) {
   const clients = new Set()
   const archive = makeArchiveStore()
   let last = {
@@ -536,8 +536,17 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
     `http://localhost:${port}`,
   ])
 
-  // 宠物窗口经 file:// 加载，Chromium 把它的 Origin 序列化成字符串 "null"
-  const isLocalPageOrigin = (origin) => !origin || origin === 'null' || trustedLocalOrigins.has(origin)
+  // Opaque origins are not identities. Only the verified Electron window receives
+  // this process-lifetime capability over IPC; standalone servers have no token.
+  const isLocalPageRequest = (req) => {
+    const origin = String(req.headers.origin || '')
+    if (!origin || trustedLocalOrigins.has(origin)) return true
+    if (origin !== 'null' || !desktopToken) return false
+    const supplied = new URL(req.url, 'http://localhost').searchParams.get('desktopToken') || ''
+    const expected = Buffer.from(desktopToken)
+    const actual = Buffer.from(supplied)
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected)
+  }
 
   const validateLocalApiRequest = (req) => {
     const origin = String(req.headers.origin || '')
@@ -622,7 +631,7 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
     if (url === '/api/events' && req.method === 'GET') {
       // SSE 流里有消息气泡、汇报全文和指令，不能对任意网页开放读取
       const origin = String(req.headers.origin || '')
-      if (!isLocalPageOrigin(origin)) {
+      if (!isLocalPageRequest(req)) {
         json(res, { ok: false, error: '事件流只对本机页面开放' }, 403)
         return
       }
@@ -670,9 +679,13 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
     const isOpenPetApi = url === '/api/event' || url === '/api/interact'
     if (isOpenPetApi && ['POST', 'OPTIONS'].includes(req.method || '')) {
       const origin = String(req.headers.origin || '')
-      if (!isLocalPageOrigin(origin)) {
+      if (!isLocalPageRequest(req)) {
         json(res, { ok: false, error: '该接口只接受本机请求', code: 'UNTRUSTED_ORIGIN' }, 403)
         return
+      }
+      if (origin) {
+        res.setHeader('Access-Control-Allow-Origin', origin)
+        res.setHeader('Vary', 'Origin')
       }
     }
 

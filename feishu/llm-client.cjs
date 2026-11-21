@@ -70,16 +70,45 @@ function loadLlmConfig() {
   }
 }
 
+function validateBaseUrl(value) {
+  const trimmed = String(value ?? '').trim()
+  if (!trimmed) return ''
+  let parsed
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    const err = new Error('baseUrl 必须是有效的 http:// 或 https:// 地址')
+    err.code = 'INVALID_BASE_URL'
+    err.status = 400
+    throw err
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    const err = new Error('baseUrl 仅支持 http:// 或 https:// 协议')
+    err.code = 'INVALID_BASE_URL'
+    err.status = 400
+    throw err
+  }
+  return trimmed
+}
+
 /** 保存配置；apiKey 传空 = 保留旧 key（前端脱敏回显场景） */
 function saveLlmConfig(patch) {
   const prev = loadLlmConfig()
   const next = { ...prev, ...patch }
   if (!patch.apiKey) next.apiKey = prev.apiKey
   next.provider = ['api', 'codex', 'claude'].includes(next.provider) ? next.provider : 'api'
+  next.baseUrl = validateBaseUrl(next.baseUrl)
   fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true })
-  ensurePrivateFileMode(CONFIG_PATH)
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), { mode: 0o600 })
-  ensurePrivateFileMode(CONFIG_PATH)
+  const tmp = `${CONFIG_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 })
+    ensurePrivateFileMode(tmp)
+    fs.renameSync(tmp, CONFIG_PATH)
+    ensurePrivateFileMode(CONFIG_PATH)
+  } catch (err) {
+    fs.rmSync(tmp, { force: true })
+    throw err
+  }
   return next
 }
 
@@ -132,39 +161,45 @@ async function llmChat(
       if (cfg.provider === 'codex') {
         const outFile = path.join(os.tmpdir(), `xiaojue-llm-${crypto.randomUUID()}.txt`)
         // 关键：-C 锁到临时目录 + 只读沙盒，否则 codex 会在当前工作目录开 agent 工具循环
-        await runCli(
-          'codex',
-          [
-            'exec',
-            '--skip-git-repo-check',
-            '--sandbox',
-            'read-only',
-            '--ephemeral',
-            '--ignore-rules',
-            ...(reasoningEffort
-              ? ['--config', `model_reasoning_effort=${reasoningEffort}`]
-              : []),
-            '-C',
-            os.tmpdir(),
-            '--output-last-message',
-            outFile,
-            prompt,
-          ],
-          cliTimeout,
-        )
-        const text = fs.readFileSync(outFile, 'utf8').trim()
-        fs.unlink(outFile, () => {})
-        if (text) return text
-        throw new Error('codex 无输出')
+        try {
+          await runCli(
+            'codex',
+            [
+              'exec',
+              '--skip-git-repo-check',
+              '--sandbox',
+              'read-only',
+              '--ephemeral',
+              '--ignore-rules',
+              ...(reasoningEffort
+                ? ['--config', `model_reasoning_effort=${reasoningEffort}`]
+                : []),
+              '-C',
+              os.tmpdir(),
+              '--output-last-message',
+              outFile,
+              '--',
+              prompt,
+            ],
+            cliTimeout,
+          )
+          const text = fs.readFileSync(outFile, 'utf8').trim()
+          if (text) return text
+          throw new Error('codex 无输出')
+        } finally {
+          fs.rmSync(outFile, { force: true })
+        }
       }
       if (cfg.provider === 'claude') {
-        const text = await runCli('claude', ['-p', prompt], cliTimeout)
+        const text = await runCli('claude', ['-p', '--', prompt], cliTimeout)
         if (text) return text
         throw new Error('claude 无输出')
       }
       // api：OpenAI 兼容接口
       if (!cfg.apiKey) throw new Error('未配置 API Key（看板「大模型设置」里填一下）')
-      const res = await fetch(`${cfg.baseUrl.replace(/\/$/, '')}/chat/completions`, {
+      const baseUrl = validateBaseUrl(cfg.baseUrl)
+      if (!baseUrl) throw new Error('未配置 API Base URL')
+      const res = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -175,7 +210,17 @@ async function llmChat(
         }),
         signal: AbortSignal.timeout(timeoutMs),
       })
-      const data = await res.json()
+      const rawText = await res.text()
+      let data = null
+      try {
+        data = JSON.parse(rawText)
+      } catch {
+        if (!res.ok) throw new Error(`API 请求失败（HTTP ${res.status}）`)
+        throw new Error('API 返回了非 JSON 响应')
+      }
+      if (!res.ok) {
+        throw new Error(data?.error?.message || `API 请求失败（HTTP ${res.status}）`)
+      }
       const text = data.choices?.[0]?.message?.content?.trim()
       if (text) return text
       throw new Error(data.error?.message || 'empty response')
@@ -328,10 +373,15 @@ function saveApprovalCache(cache) {
     .slice(0, APPROVAL_CACHE_MAX)
   cache.entries = Object.fromEntries(entries)
   fs.mkdirSync(path.dirname(APPROVAL_CACHE_PATH), { recursive: true })
-  // 原子写：先写临时文件再 rename，避免写一半进程被杀留下坏 JSON
-  const tmp = `${APPROVAL_CACHE_PATH}.tmp`
-  fs.writeFileSync(tmp, JSON.stringify(cache, null, 2), { mode: 0o600 })
-  fs.renameSync(tmp, APPROVAL_CACHE_PATH)
+  // 原子写：先写独立临时文件再 rename，避免写一半进程被杀或并发覆写留下坏 JSON
+  const tmp = `${APPROVAL_CACHE_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(cache, null, 2), { mode: 0o600 })
+    fs.renameSync(tmp, APPROVAL_CACHE_PATH)
+  } catch (err) {
+    fs.rmSync(tmp, { force: true })
+    throw err
+  }
 }
 
 async function evaluateApprovalCached(instanceCode, approval, { force = false } = {}) {

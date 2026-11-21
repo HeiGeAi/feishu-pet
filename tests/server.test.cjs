@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict')
+const http = require('node:http')
 const test = require('node:test')
 const fs = require('node:fs')
 const os = require('node:os')
@@ -132,4 +133,103 @@ test('Electron capability authenticates initial connection and reconnect; local 
   assert.equal(response.headers.get('access-control-allow-origin'), 'null')
   const foreign = await fetch(base + '/api/events?desktopToken=' + 'a'.repeat(64), { headers: { origin: 'https://evil.example', connection: 'close' } })
   assert.equal(foreign.status, 403)
+})
+
+test('invalid event state returns HTTP 400 and split multi-byte UTF-8 chunks stay intact', async () => {
+  const invalid = await post('/api/event', JSON.stringify({ state: 'nonexistent', label: 'bad' }))
+  assert.equal(invalid.status, 400)
+  assert.equal(invalid.json.ok, false)
+  assert.equal(invalid.json.code, 'INVALID_STATE')
+
+  // Split a 3-byte Chinese UTF-8 sequence across separate HTTP write chunks.
+  const payload = Buffer.from(JSON.stringify({ state: 'working', label: '中文分块测试🐾' }), 'utf8')
+  const splitIndex = payload.indexOf(Buffer.from('中', 'utf8')) + 1
+  const chunkedResult = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: '127.0.0.1',
+        port: TEST_PORT,
+        path: '/api/event',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': payload.length,
+          connection: 'close',
+        },
+      },
+      (res) => {
+        const parts = []
+        res.on('data', (chunk) => parts.push(chunk))
+        res.on('end', () => resolve({
+          status: res.statusCode,
+          json: JSON.parse(Buffer.concat(parts).toString('utf8')),
+        }))
+      },
+    )
+    req.on('error', reject)
+    req.write(payload.subarray(0, splitIndex))
+    setTimeout(() => {
+      req.end(payload.subarray(splitIndex))
+    }, 10)
+  })
+  assert.equal(chunkedResult.status, 200)
+  assert.equal(chunkedResult.json.event.label, '中文分块测试🐾')
+})
+
+test('malformed percent-encoding in workspace route returns 400 instead of 500', async () => {
+  const res = await fetch(base + '/api/workspace/approvals/%E0%A4%A', {
+    headers: { connection: 'close' },
+  })
+  const data = await res.json()
+  assert.equal(res.status, 400)
+  assert.equal(data.code, 'INVALID_URI')
+})
+
+test('llm-config rejects non-http baseUrl with 400 and persists valid config atomically with 0600', async () => {
+  const badScheme = await post('/api/llm-config', JSON.stringify({
+    provider: 'api',
+    baseUrl: 'file:///etc/passwd',
+    model: 'gpt-4o-mini',
+  }), { 'x-feishu-pet-request': '1' })
+  assert.equal(badScheme.status, 400)
+  assert.equal(badScheme.json.code, 'INVALID_BASE_URL')
+
+  const okCfg = await post('/api/llm-config', JSON.stringify({
+    provider: 'api',
+    baseUrl: 'https://api.example.com/v1',
+    model: 'gpt-4o-mini',
+    apiKey: 'test-key-123456',
+  }), { 'x-feishu-pet-request': '1' })
+  assert.equal(okCfg.status, 200)
+  assert.equal(okCfg.json.ok, true)
+  const configPath = path.join(testHome, '.xiaojue-pet', 'llm.json')
+  assert.equal(fs.statSync(configPath).mode & 0o777, 0o600)
+})
+
+test('static server works with trailing-slash distDir and blocks symlink escape', async () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-pet-static-'))
+  const dist = path.join(scratch, 'dist')
+  const secret = path.join(scratch, 'secret.txt')
+  fs.mkdirSync(dist, { recursive: true })
+  fs.writeFileSync(path.join(dist, 'index.html'), '<h1>ok</h1>')
+  fs.writeFileSync(secret, 'TOP_SECRET')
+  fs.symlinkSync(secret, path.join(dist, 'escape.txt'))
+  const staticPort = 7612
+  const staticServer = startPetServer({
+    port: staticPort,
+    host: '127.0.0.1',
+    distDir: dist + path.sep,
+  })
+  await new Promise((resolve) => staticServer.on('listening', resolve))
+  try {
+    const okRes = await fetch(`http://127.0.0.1:${staticPort}/`, { headers: { connection: 'close' } })
+    assert.equal(okRes.status, 200)
+    assert.equal(await okRes.text(), '<h1>ok</h1>')
+
+    const escaped = await fetch(`http://127.0.0.1:${staticPort}/escape.txt`, { headers: { connection: 'close' } })
+    assert.equal(escaped.status, 404)
+  } finally {
+    await new Promise((resolve) => staticServer.close(resolve))
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
 })

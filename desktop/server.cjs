@@ -54,12 +54,13 @@ const ARCHIVE_MAX = 800
 
 function readJsonBody(req, maxBytes = 512 * 1024) {
   return new Promise((resolve, reject) => {
-    let body = ''
+    const chunks = []
     let size = 0
     let settled = false
     req.on('data', (chunk) => {
       if (settled) return
-      size += chunk.length
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      size += buf.length
       if (size > maxBytes) {
         settled = true
         reject(
@@ -71,11 +72,12 @@ function readJsonBody(req, maxBytes = 512 * 1024) {
         req.resume()
         return
       }
-      body += chunk
+      chunks.push(buf)
     })
     req.on('end', () => {
       if (settled) return
       try {
+        const body = Buffer.concat(chunks, size).toString('utf8')
         resolve(JSON.parse(body || '{}'))
       } catch {
         reject(
@@ -88,6 +90,17 @@ function readJsonBody(req, maxBytes = 512 * 1024) {
     })
     req.on('error', reject)
   })
+}
+
+function decodeRouteParam(value) {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    throw new workspace.WorkspaceError('路径参数编码不正确', {
+      code: 'INVALID_URI',
+      status: 400,
+    })
+  }
 }
 
 function cleanPlanString(value, max = 3000) {
@@ -324,7 +337,7 @@ async function handleWorkspaceRoute(req, res, url, json) {
     return
   }
   if (approvalMatch && req.method === 'GET') {
-    json(res, { ok: true, data: await workspace.getApproval(decodeURIComponent(approvalMatch[1])) })
+    json(res, { ok: true, data: await workspace.getApproval(decodeRouteParam(approvalMatch[1])) })
     return
   }
   if (url === '/api/workspace/approvals/evaluate' && req.method === 'POST') {
@@ -347,7 +360,7 @@ async function handleWorkspaceRoute(req, res, url, json) {
     json(res, {
       ok: true,
       data: await workspace.decideApproval({
-        instanceCode: decodeURIComponent(approvalDecisionMatch[1]),
+        instanceCode: decodeRouteParam(approvalDecisionMatch[1]),
         taskId: body.taskId,
         action: body.action,
         comment: body.comment,
@@ -374,7 +387,7 @@ async function handleWorkspaceRoute(req, res, url, json) {
     }
     json(res, {
       ok: true,
-      data: await workspace.completeTask(decodeURIComponent(taskCompleteMatch[1])),
+      data: await workspace.completeTask(decodeRouteParam(taskCompleteMatch[1])),
     })
     return
   }
@@ -382,7 +395,7 @@ async function handleWorkspaceRoute(req, res, url, json) {
     const body = await readJsonBody(req)
     json(res, {
       ok: true,
-      data: await workspace.updateTask(decodeURIComponent(taskMatch[1]), body),
+      data: await workspace.updateTask(decodeRouteParam(taskMatch[1]), body),
     })
     return
   }
@@ -405,7 +418,7 @@ async function handleWorkspaceRoute(req, res, url, json) {
     const body = await readJsonBody(req)
     json(res, {
       ok: true,
-      data: await workspace.updateCalendarEvent(decodeURIComponent(eventMatch[1]), body),
+      data: await workspace.updateCalendarEvent(decodeRouteParam(eventMatch[1]), body),
     })
     return
   }
@@ -448,10 +461,15 @@ function makeArchiveStore() {
     dirty = false
     try {
       fs.mkdirSync(path.dirname(ARCHIVE_PATH), { recursive: true })
-      // 原子写：先写临时文件再 rename，避免写一半进程被杀留下坏 JSON
-      const tmp = `${ARCHIVE_PATH}.tmp`
-      fs.writeFileSync(tmp, JSON.stringify(items))
-      fs.renameSync(tmp, ARCHIVE_PATH)
+      // 原子写：先写独立临时文件再 rename，避免写一半进程被杀或并发覆写留下坏 JSON
+      const tmp = `${ARCHIVE_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`
+      try {
+        fs.writeFileSync(tmp, JSON.stringify(items), { mode: 0o600 })
+        fs.renameSync(tmp, ARCHIVE_PATH)
+      } catch (err) {
+        fs.rmSync(tmp, { force: true })
+        throw err
+      }
     } catch {
       /* 写不进就算了 */
     }
@@ -575,14 +593,15 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
   }
 
   const server = http.createServer((req, res) => {
-    let url = req.url?.split('?')[0] || '/'
+    const rawPath = req.url?.split('?')[0] || '/'
+    let url = rawPath
     try {
-      url = decodeURIComponent(url)
+      url = decodeURIComponent(rawPath)
     } catch {
-      /* 保持原样 */
+      /* 静态路径保持原样，工作台路由单独按段严格解码 */
     }
 
-    const isWorkspaceApi = url.startsWith('/api/workspace/')
+    const isWorkspaceApi = rawPath.startsWith('/api/workspace/')
     // 汇报全文与干活指令只接受本机页面/本机进程写入；/api/event 与 /api/interact 保持开放（对外埋点协议）
     const isLlmSettingsApi = url === '/api/llm-config' || url === '/api/llm-test' ||
       url === '/api/report' || url === '/api/command'
@@ -609,7 +628,7 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
         return
       }
       if (isWorkspaceApi) {
-        handleWorkspaceRoute(req, res, url, json).catch((err) => {
+        handleWorkspaceRoute(req, res, rawPath, json).catch((err) => {
           const status = Number(err?.status) || 500
           console.warn(`[workspace] ${req.method} ${url}: ${err?.message || err}`)
           json(
@@ -708,7 +727,8 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
             json(res, {
               ok: false,
               error: `state 必须是 ${[...VALID_STATES].join('/')}`,
-            })
+              code: 'INVALID_STATE',
+            }, 400)
             return
           }
           const ev = {
@@ -858,13 +878,18 @@ function startPetServer({ port = 7100, host = '127.0.0.1', distDir, onEvent, onE
     // 静态文件（调试看板）；二级页面走 SPA 入口
     if (req.method === 'GET' && distDir) {
       const rel = ['/', '/archive', '/workbench', '/assistant'].includes(url) ? '/index.html' : url
-      const file = path.normalize(path.join(distDir, rel))
-      if (file.startsWith(path.normalize(distDir) + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
-        res.writeHead(200, {
-          'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
-        })
-        fs.createReadStream(file).pipe(res)
-        return
+      const rootDir = path.resolve(distDir)
+      const file = path.resolve(rootDir, `.${rel.startsWith('/') ? rel : `/${rel}`}`)
+      if (file.startsWith(rootDir + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
+        const realRoot = fs.realpathSync(rootDir)
+        const realFile = fs.realpathSync(file)
+        if (realFile.startsWith(realRoot + path.sep)) {
+          res.writeHead(200, {
+            'Content-Type': MIME[path.extname(realFile)] || 'application/octet-stream',
+          })
+          fs.createReadStream(realFile).pipe(res)
+          return
+        }
       }
     }
 
